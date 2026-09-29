@@ -93,7 +93,22 @@ def get_iv_rank(symbol: str) -> float:
         print(f"取得 {symbol} IV Rank 失敗: {e}")
         return 0.0
 
-def get_real_put_option(symbol: str, current_price: float, target_delta: float = 0.15):
+def get_next_earnings(symbol: str):
+    """從 yfinance 取得下一次財報日"""
+    try:
+        ticker = yf.Ticker(symbol)
+        calendar = ticker.calendar
+        if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
+            dates = calendar['Earnings Date']
+            today = datetime.date.today()
+            upcoming = [d for d in dates if d >= today]
+            if upcoming:
+                return upcoming[0]
+    except:
+        pass
+    return None
+
+def get_real_put_option(symbol: str, current_price: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     """從 yfinance 取得真實 Sell Put 候選合約 (尋找最接近目標 Delta)"""
     try:
         ticker = yf.Ticker(symbol)
@@ -142,7 +157,7 @@ def get_real_put_option(symbol: str, current_price: float, target_delta: float =
     except Exception as e:
         return None
 
-def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_delta: float = 0.15):
+def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     """從 yfinance 取得真實 Covered Call 候選合約 (尋找最接近目標 Delta)"""
     try:
         ticker = yf.Ticker(symbol)
@@ -355,12 +370,14 @@ with tab3:
             sp_rsi_threshold = st.number_input("RSI 低於此值 (超賣)", value=35, step=1, max_value=100, min_value=0)
             sp_iv_threshold = st.number_input("IV (%) 高於此值", value=50.0, step=1.0, min_value=0.0)
             sp_target_delta = st.number_input("Sell Put 目標 Delta (絕對值)", value=0.15, step=0.01, min_value=0.01, max_value=0.50)
+            sp_avoid_earnings = st.checkbox("避開財報日 (推薦合約不跨越財報)", value=True, key="sp_earn")
             
         with col_cc:
             st.markdown("**Covered Call (現貨庫存) 條件**")
             cc_rsi_threshold = st.number_input("RSI 高於此值 (超買)", value=70, step=1, max_value=100, min_value=0)
             cc_iv_threshold = st.number_input("IV (%) 高於此值 (CC)", value=30.0, step=1.0, min_value=0.0)
             cc_target_delta = st.number_input("Covered Call 目標 Delta", value=0.15, step=0.01, min_value=0.01, max_value=0.50)
+            cc_avoid_earnings = st.checkbox("避開財報日 (推薦合約不跨越財報)", value=False, key="cc_earn")
 
     if st.button("🔍 開始掃描訊號", use_container_width=True, type="primary"):
         with st.spinner("掃描中，請稍候..."):
@@ -376,12 +393,14 @@ with tab3:
                 
                 # 根據使用者設定的條件進行判斷
                 if rsi < sp_rsi_threshold and iv > sp_iv_threshold:
-                    option = get_real_put_option(symbol, price, sp_target_delta)
+                    earnings_date = get_next_earnings(symbol)
+                    option = get_real_put_option(symbol, price, sp_target_delta, sp_avoid_earnings, earnings_date)
                     if not option: continue
                     
+                    earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
                     msg = (
                         f"🚨 <b>Sell Put 訊號觸發！</b>\n"
-                        f"標的：${symbol} (目前股價 ${price})\n"
+                        f"標的：${symbol} (目前股價 ${price}){earn_str}\n"
                         f"指標：RSI = {rsi} | IV(%) = {iv}\n"
                         f"-------------------------\n"
                         f"推薦合約：{symbol} {option['dte']}天後到期 ${option['strike']} Put\n"
@@ -404,12 +423,14 @@ with tab3:
                 
                 # 根據使用者設定的條件進行判斷
                 if rsi > cc_rsi_threshold and iv > cc_iv_threshold:
-                    option = get_real_call_option(symbol, price, cost_basis, cc_target_delta)
+                    earnings_date = get_next_earnings(symbol)
+                    option = get_real_call_option(symbol, price, cost_basis, cc_target_delta, cc_avoid_earnings, earnings_date)
                     if not option: continue
                     
+                    earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
                     msg = (
                         f"🎯 <b>Covered Call 訊號觸發！</b>\n"
-                        f"標的：${symbol} (目前股價 ${price}) | 持股成本: ${cost_basis}\n"
+                        f"標的：${symbol} (目前股價 ${price}) | 持股成本: ${cost_basis}{earn_str}\n"
                         f"指標：RSI = {rsi} | IV(%) = {iv}\n"
                         f"-------------------------\n"
                         f"推薦合約：{symbol} {option['dte']}天後到期 ${option['strike']} Call\n"

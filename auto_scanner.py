@@ -70,13 +70,31 @@ def get_iv_rank(symbol: str) -> float:
     except:
         return 0.0
 
-def get_real_put_option(symbol: str, current_price: float, target_delta: float = 0.15):
+def get_next_earnings(symbol: str):
+    try:
+        ticker = yf.Ticker(symbol)
+        calendar = ticker.calendar
+        if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
+            dates = calendar['Earnings Date']
+            today = datetime.date.today()
+            upcoming = [d for d in dates if d >= today]
+            if upcoming:
+                return upcoming[0]
+    except:
+        pass
+    return None
+
+def get_real_put_option(symbol: str, current_price: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
+        if avoid_earnings and earnings_date:
+            valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
+        if not valid_dates: return None
+        
         target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
         if not target_dates:
             target_date = today + datetime.timedelta(days=30)
@@ -100,13 +118,17 @@ def get_real_put_option(symbol: str, current_price: float, target_delta: float =
     except:
         return None
 
-def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_delta: float = 0.15):
+def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
+        if avoid_earnings and earnings_date:
+            valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
+        if not valid_dates: return None
+        
         target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
         if not target_dates:
             target_date = today + datetime.timedelta(days=30)
@@ -154,6 +176,8 @@ def run_scan():
     # 預設參數 (可根據需要修改或設計從 DB 讀取)
     SP_RSI_THRESH, SP_IV_THRESH, SP_DELTA = 35, 50.0, 0.15
     CC_RSI_THRESH, CC_IV_THRESH, CC_DELTA = 70, 30.0, 0.15
+    SP_AVOID_EARNINGS = True
+    CC_AVOID_EARNINGS = False
 
     # 1. 掃描 Sell Put
     watchlist = supabase.table("watchlist").select("*").execute().data
@@ -165,11 +189,13 @@ def run_scan():
             iv = get_iv_rank(symbol)
             
             if rsi < SP_RSI_THRESH and iv > SP_IV_THRESH:
-                option = get_real_put_option(symbol, price, SP_DELTA)
+                earnings_date = get_next_earnings(symbol)
+                option = get_real_put_option(symbol, price, SP_DELTA, SP_AVOID_EARNINGS, earnings_date)
                 if not option: continue
+                earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
                 msg = (
                     f"🚨 <b>【自動掃描】Sell Put 訊號觸發！</b>\n"
-                    f"標的：${symbol} (現價 ${price})\n"
+                    f"標的：${symbol} (現價 ${price}){earn_str}\n"
                     f"指標：RSI = {rsi} | IV = {iv}%\n"
                     f"-------------------------\n"
                     f"推薦合約：{option['dte']}天後到期 ${option['strike']} Put\n"
@@ -190,11 +216,13 @@ def run_scan():
             iv = get_iv_rank(symbol)
             
             if rsi > CC_RSI_THRESH and iv > CC_IV_THRESH:
-                option = get_real_call_option(symbol, price, cost_basis, CC_DELTA)
+                earnings_date = get_next_earnings(symbol)
+                option = get_real_call_option(symbol, price, cost_basis, CC_DELTA, CC_AVOID_EARNINGS, earnings_date)
                 if not option: continue
+                earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
                 msg = (
                     f"🎯 <b>【自動掃描】Covered Call 訊號觸發！</b>\n"
-                    f"標的：${symbol} (現價 ${price}) | 成本: ${cost_basis}\n"
+                    f"標的：${symbol} (現價 ${price}) | 成本: ${cost_basis}{earn_str}\n"
                     f"指標：RSI = {rsi} | IV = {iv}%\n"
                     f"-------------------------\n"
                     f"推薦合約：{option['dte']}天後到期 ${option['strike']} Call\n"
