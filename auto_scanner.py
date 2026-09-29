@@ -70,12 +70,20 @@ def get_iv_rank(symbol: str) -> float:
         pass
         
     try:
+        import numpy as np
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period="2mo")
-        if not df.empty and len(df) > 30:
+        df = ticker.history(period="1y")
+        if not df.empty and len(df) > 50:
             df['Return'] = df['Close'].pct_change()
-            hv = df['Return'].tail(30).std() * (252 ** 0.5) * 100
-            return round(hv, 2)
+            hv = df['Return'].rolling(window=30).std() * (252 ** 0.5) * 100
+            hv = hv.dropna()
+            if not hv.empty:
+                current_hv = hv.iloc[-1]
+                min_hv = hv.min()
+                max_hv = hv.max()
+                if max_hv > min_hv:
+                    hv_rank = (current_hv - min_hv) / (max_hv - min_hv) * 100
+                    return round(hv_rank, 2)
     except:
         pass
         
