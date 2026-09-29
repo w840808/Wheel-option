@@ -1,0 +1,36 @@
+name: Wheel Strategy Auto Scanner
+
+on:
+  schedule:
+    # 每天 UTC 時間 14:00 執行 (大約是美東開盤時間 10:00 AM)
+    # 您可以依據需要修改 (格式: 分 時 日 月 星期)
+    - cron: '0 14 * * 1-5'
+  # 允許手動從 GitHub 介面觸發測試
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Auto Scanner
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: |
+        python auto_scanner.py
