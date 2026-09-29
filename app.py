@@ -296,12 +296,14 @@ with tab1:
                 sym = row['symbol']
                 price, rsi = calculate_rsi(sym)
                 ivr = get_iv_rank(sym)
+                earn_date = get_next_earnings(sym)
                 display_data.append({
                     "ID": row['id'],
                     "標的": sym,
                     "最新股價": f"${price}" if price else "N/A",
                     "14日 RSI": rsi if rsi else "N/A",
-                    "IV (%)": ivr
+                    "IV Rank (%)": ivr,
+                    "下期財報日": str(earn_date) if earn_date else "N/A"
                 })
                 
             df_wl = pd.DataFrame(display_data)
@@ -352,6 +354,7 @@ with tab2:
                 cost = row['cost_basis']
                 price, rsi = calculate_rsi(sym)
                 ivr = get_iv_rank(sym)
+                earn_date = get_next_earnings(sym)
                 
                 pnl_str = "N/A"
                 if price:
@@ -366,7 +369,8 @@ with tab2:
                     "最新股價": f"${price}" if price else "N/A",
                     "未實現損益": pnl_str,
                     "14日 RSI": rsi if rsi else "N/A",
-                    "IV (%)": ivr
+                    "IV Rank (%)": ivr,
+                    "下期財報日": str(earn_date) if earn_date else "N/A"
                 })
                 
             df_pf = pd.DataFrame(display_data)
