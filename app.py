@@ -68,30 +68,39 @@ def calculate_rsi(symbol: str, window: int = 14):
         return None, None
 
 def get_iv_rank(symbol: str) -> float:
-    """從 AlphaQuery 爬取指定美股的 IV Rank (30-Day)"""
+    """從 AlphaQuery 爬取指定美股的 IV (30-Day)，若在雲端被擋則改算 30天歷史波動率 (HV)"""
     try:
         url = f"https://www.alphaquery.com/stock/{symbol.upper()}/volatility-option-statistics/30-day/iv-mean"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # 注意：AlphaQuery 免費版網頁已移除 "IV Rank/Percentile" (改為付費版 VolVue 功能)
-            # 因此我們改抓 30-Day Implied Volatility (Mean) 作為實際 IV 參考
             iv_element = soup.find('div', string='Implied Volatility (Mean)')
             if iv_element:
                 try:
                     iv_value_str = iv_element.find_parent('tr').find('div', class_='indicator-figure-inner').text.strip()
-                    iv_value = float(iv_value_str) * 100  # 轉為百分比 (0.2484 -> 24.84%)
+                    iv_value = float(iv_value_str) * 100  # 轉為百分比
                     return round(iv_value, 2)
                 except:
                     pass
-        return 0.0
-    except Exception as e:
-        print(f"取得 {symbol} IV Rank 失敗: {e}")
-        return 0.0
+    except:
+        pass
+        
+    # 備用方案：使用 yfinance 計算 30天歷史波動率 (Historical Volatility)
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2mo")
+        if not df.empty and len(df) > 30:
+            df['Return'] = df['Close'].pct_change()
+            hv = df['Return'].tail(30).std() * (252 ** 0.5) * 100
+            return round(hv, 2)
+    except:
+        pass
+        
+    return 0.0
 
 def get_next_earnings(symbol: str):
     """從 yfinance 取得下一次財報日"""

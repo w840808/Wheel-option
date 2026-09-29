@@ -56,7 +56,7 @@ def get_iv_rank(symbol: str) -> float:
     try:
         url = f"https://www.alphaquery.com/stock/{symbol.upper()}/volatility-option-statistics/30-day/iv-mean"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             iv_element = soup.find('div', string='Implied Volatility (Mean)')
@@ -66,9 +66,20 @@ def get_iv_rank(symbol: str) -> float:
                     return round(float(iv_value_str) * 100, 2)
                 except:
                     pass
-        return 0.0
     except:
-        return 0.0
+        pass
+        
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2mo")
+        if not df.empty and len(df) > 30:
+            df['Return'] = df['Close'].pct_change()
+            hv = df['Return'].tail(30).std() * (252 ** 0.5) * 100
+            return round(hv, 2)
+    except:
+        pass
+        
+    return 0.0
 
 def get_next_earnings(symbol: str):
     try:
