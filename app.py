@@ -136,10 +136,14 @@ def get_real_put_option(symbol: str, current_price: float, target_delta: float =
             
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
-        target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
+        
+        if avoid_earnings and earnings_date:
+            valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
+        if not valid_dates: return None
+        
+        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
         
         if not target_dates:
-            target_date = today + datetime.timedelta(days=30)
             best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
             target_dates = [best_match]
             
@@ -185,10 +189,14 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
             
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
-        target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
+        
+        if avoid_earnings and earnings_date:
+            valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
+        if not valid_dates: return None
+        
+        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
         
         if not target_dates:
-            target_date = today + datetime.timedelta(days=30)
             best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
             target_dates = [best_match]
             
@@ -386,8 +394,8 @@ with tab3:
         col_sp, col_cc = st.columns(2)
         with col_sp:
             st.markdown("**Sell Put (觀察清單) 條件**")
-            sp_rsi_threshold = st.number_input("RSI 低於此值 (超賣)", value=35, step=1, max_value=100, min_value=0)
-            sp_iv_threshold = st.number_input("IV (%) 高於此值", value=50.0, step=1.0, min_value=0.0)
+            sp_rsi_threshold = st.number_input("RSI 低於此值 (超賣)", value=45, step=1, max_value=100, min_value=0)
+            sp_iv_threshold = st.number_input("IV (%) 高於此值", value=30.0, step=1.0, min_value=0.0)
             sp_target_delta = st.number_input("Sell Put 目標 Delta (絕對值)", value=0.15, step=0.01, min_value=0.01, max_value=0.50)
             sp_avoid_earnings = st.checkbox("避開財報日 (推薦合約不跨越財報)", value=True, key="sp_earn")
             

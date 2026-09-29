@@ -114,9 +114,8 @@ def get_real_put_option(symbol: str, current_price: float, target_delta: float =
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
         if not target_dates:
-            target_date = today + datetime.timedelta(days=30)
             target_dates = [min(valid_dates, key=lambda x: abs(x[1] - 30))]
         best_date, dte = target_dates[0]
         opt = ticker.option_chain(best_date)
@@ -148,9 +147,8 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 30 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
         if not target_dates:
-            target_date = today + datetime.timedelta(days=30)
             target_dates = [min(valid_dates, key=lambda x: abs(x[1] - 30))]
         best_date, dte = target_dates[0]
         opt = ticker.option_chain(best_date)
@@ -193,7 +191,7 @@ def run_scan():
     print(f"[{datetime.datetime.now()}] 開始執行自動掃描任務...")
     
     # 預設參數 (可根據需要修改或設計從 DB 讀取)
-    SP_RSI_THRESH, SP_IV_THRESH, SP_DELTA = 35, 50.0, 0.15
+    SP_RSI_THRESH, SP_IV_THRESH, SP_DELTA = 45, 30.0, 0.15
     CC_RSI_THRESH, CC_IV_THRESH, CC_DELTA = 70, 30.0, 0.15
     SP_AVOID_EARNINGS = True
     CC_AVOID_EARNINGS = False
