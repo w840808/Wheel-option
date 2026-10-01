@@ -166,12 +166,17 @@ def get_real_put_option(symbol: str, current_price: float, target_deltas: list =
             
         otm_puts['delta_abs'] = deltas
         results = []
+        selected_strikes = set()
         for target_delta in target_deltas:
-            otm_puts['delta_dist'] = (otm_puts['delta_abs'] - target_delta).abs()
-            best_put = otm_puts.sort_values('delta_dist').iloc[0]
+            available_puts = otm_puts[~otm_puts['strike'].isin(selected_strikes)].copy()
+            if available_puts.empty: break
+            
+            available_puts['delta_dist'] = (available_puts['delta_abs'] - target_delta).abs()
+            best_put = available_puts.sort_values('delta_dist').iloc[0]
             
             premium = (best_put['bid'] + best_put['ask']) / 2 if best_put['bid'] > 0 else best_put['lastPrice']
             strike = float(best_put['strike'])
+            selected_strikes.add(strike)
             ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
             
             results.append({
@@ -227,12 +232,17 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
             
         otm_calls['delta'] = deltas
         results = []
+        selected_strikes = set()
         for target_delta in target_deltas:
-            otm_calls['delta_dist'] = (otm_calls['delta'] - target_delta).abs()
-            best_call = otm_calls.sort_values('delta_dist').iloc[0]
+            available_calls = otm_calls[~otm_calls['strike'].isin(selected_strikes)].copy()
+            if available_calls.empty: break
+            
+            available_calls['delta_dist'] = (available_calls['delta'] - target_delta).abs()
+            best_call = available_calls.sort_values('delta_dist').iloc[0]
             
             premium = (best_call['bid'] + best_call['ask']) / 2 if best_call['bid'] > 0 else best_call['lastPrice']
             strike = float(best_call['strike'])
+            selected_strikes.add(strike)
             # CC Annualized return is typically calculated on the current price or cost basis
             # Let's use current_price for standard yield
             ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
