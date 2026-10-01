@@ -103,7 +103,7 @@ def get_next_earnings(symbol: str):
         pass
     return None
 
-def get_real_put_option(symbol: str, current_price: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
+def get_real_put_option(symbol: str, current_price: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
@@ -129,14 +129,19 @@ def get_real_put_option(symbol: str, current_price: float, target_delta: float =
             if iv == 0 or pd.isna(iv): iv = 0.01
             deltas.append(abs(calculate_bs_delta(current_price, row['strike'], t_years, 0.04, iv, "put")))
         otm_puts['delta_abs'] = deltas
-        otm_puts['delta_dist'] = (otm_puts['delta_abs'] - target_delta).abs()
-        best_put = otm_puts.sort_values('delta_dist').iloc[0]
-        premium = (best_put['bid'] + best_put['ask']) / 2 if best_put['bid'] > 0 else best_put['lastPrice']
-        return {"dte": dte, "strike": float(best_put['strike']), "delta": round(-best_put['delta_abs'], 3), "premium": round(float(premium), 2), "type": "Put"}
+        results = []
+        for target_delta in target_deltas:
+            otm_puts['delta_dist'] = (otm_puts['delta_abs'] - target_delta).abs()
+            best_put = otm_puts.sort_values('delta_dist').iloc[0]
+            premium = (best_put['bid'] + best_put['ask']) / 2 if best_put['bid'] > 0 else best_put['lastPrice']
+            strike = float(best_put['strike'])
+            ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
+            results.append({"dte": dte, "strike": strike, "delta": round(-best_put['delta_abs'], 3), "premium": round(float(premium), 2), "annualized_return": round(ar, 2), "type": "Put"})
+        return results
     except:
         return None
 
-def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_delta: float = 0.15, avoid_earnings: bool = False, earnings_date: datetime.date = None):
+def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
@@ -163,10 +168,15 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
             if iv == 0 or pd.isna(iv): iv = 0.01
             deltas.append(calculate_bs_delta(current_price, row['strike'], t_years, 0.04, iv, "call"))
         otm_calls['delta'] = deltas
-        otm_calls['delta_dist'] = (otm_calls['delta'] - target_delta).abs()
-        best_call = otm_calls.sort_values('delta_dist').iloc[0]
-        premium = (best_call['bid'] + best_call['ask']) / 2 if best_call['bid'] > 0 else best_call['lastPrice']
-        return {"dte": dte, "strike": float(best_call['strike']), "delta": round(best_call['delta'], 3), "premium": round(float(premium), 2), "type": "Call"}
+        results = []
+        for target_delta in target_deltas:
+            otm_calls['delta_dist'] = (otm_calls['delta'] - target_delta).abs()
+            best_call = otm_calls.sort_values('delta_dist').iloc[0]
+            premium = (best_call['bid'] + best_call['ask']) / 2 if best_call['bid'] > 0 else best_call['lastPrice']
+            strike = float(best_call['strike'])
+            ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
+            results.append({"dte": dte, "strike": strike, "delta": round(best_call['delta'], 3), "premium": round(float(premium), 2), "annualized_return": round(ar, 2), "type": "Call"})
+        return results
     except:
         return None
 
@@ -207,19 +217,24 @@ def run_scan():
             
             if rsi < SP_RSI_THRESH and iv > SP_IV_THRESH:
                 earnings_date = get_next_earnings(symbol)
-                option = get_real_put_option(symbol, price, SP_DELTA, SP_AVOID_EARNINGS, earnings_date)
-                if not option: continue
+                options = get_real_put_option(symbol, price, [0.15, 0.25], SP_AVOID_EARNINGS, earnings_date)
+                if not options: continue
                 earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
+                
+                opts_msg = ""
+                for opt in options:
+                    opts_msg += (f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Put</b>\n"
+                                 f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n")
+                                 
                 msg = (
                     f"🚨 <b>【自動掃描】Sell Put 訊號觸發！</b>\n"
                     f"標的：${symbol} (現價 ${price}){earn_str}\n"
                     f"指標：RSI = {rsi} | IV = {iv}%\n"
                     f"-------------------------\n"
-                    f"推薦合約：{option['dte']}天後到期 ${option['strike']} Put\n"
-                    f"Delta: {option['delta']} | 預估權利金: ${option['premium']}"
+                    f"推薦合約：\n{opts_msg}"
                 )
                 send_telegram_message(msg)
-                log_signal_to_db(symbol, "SP_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Strike: {option['strike']}, DTE: {option['dte']}")
+                log_signal_to_db(symbol, "SP_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
                 print(f"✅ 已推播 {symbol} Sell Put 訊號")
 
     # 2. 掃描 Covered Call
@@ -234,19 +249,24 @@ def run_scan():
             
             if rsi > CC_RSI_THRESH and iv > CC_IV_THRESH:
                 earnings_date = get_next_earnings(symbol)
-                option = get_real_call_option(symbol, price, cost_basis, CC_DELTA, CC_AVOID_EARNINGS, earnings_date)
-                if not option: continue
+                options = get_real_call_option(symbol, price, cost_basis, [0.15, 0.25], CC_AVOID_EARNINGS, earnings_date)
+                if not options: continue
                 earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
+                
+                opts_msg = ""
+                for opt in options:
+                    opts_msg += (f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Call</b>\n"
+                                 f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n")
+                                 
                 msg = (
                     f"🎯 <b>【自動掃描】Covered Call 訊號觸發！</b>\n"
                     f"標的：${symbol} (現價 ${price}) | 成本: ${cost_basis}{earn_str}\n"
                     f"指標：RSI = {rsi} | IV = {iv}%\n"
                     f"-------------------------\n"
-                    f"推薦合約：{option['dte']}天後到期 ${option['strike']} Call\n"
-                    f"Delta: {option['delta']} | 預估權利金: ${option['premium']}"
+                    f"推薦合約：\n{opts_msg}"
                 )
                 send_telegram_message(msg)
-                log_signal_to_db(symbol, "CC_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Strike: {option['strike']}, DTE: {option['dte']}")
+                log_signal_to_db(symbol, "CC_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
                 print(f"✅ 已推播 {symbol} Covered Call 訊號")
                 
     print(f"[{datetime.datetime.now()}] 掃描任務完成！")
