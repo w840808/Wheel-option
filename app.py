@@ -160,7 +160,7 @@ def get_real_put_option(symbol: str, current_price: float, target_deltas: list =
         deltas = []
         for idx, row in otm_puts.iterrows():
             iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.01
+            if iv == 0 or pd.isna(iv): iv = 0.40
             delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
             deltas.append(abs(delta))
             
@@ -226,7 +226,7 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
         deltas = []
         for idx, row in otm_calls.iterrows():
             iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.01
+            if iv == 0 or pd.isna(iv): iv = 0.40
             delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
             deltas.append(delta)
             
