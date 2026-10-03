@@ -127,13 +127,14 @@ def get_next_earnings(symbol: str):
         pass
     return None
 
-def get_real_put_option(symbol: str, current_price: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
-    """從 yfinance 取得真實 Sell Put 候選合約 (尋找最接近目標 Delta)"""
+def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.3, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
+        import datetime
+        import pandas as pd
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
-            
+        
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
         
@@ -141,60 +142,66 @@ def get_real_put_option(symbol: str, current_price: float, target_deltas: list =
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 10 <= d[1] <= 45]
         
         if not target_dates:
             best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
             target_dates = [best_match]
             
-        best_date, dte = target_dates[0]
-        opt = ticker.option_chain(best_date)
-        puts = opt.puts
+        all_options = []
+        r = 0.04
         
-        otm_puts = puts[puts['strike'] < current_price].copy()
-        if otm_puts.empty: return None
+        for date_str, dte in target_dates:
+            try:
+                opt = ticker.option_chain(date_str)
+                puts = opt.puts
+                otm_puts = puts[puts['strike'] < current_price].copy()
+                if otm_puts.empty: continue
+                
+                t_years = dte / 365.0
+                
+                for idx, row in otm_puts.iterrows():
+                    iv = row['impliedVolatility']
+                    if iv == 0 or pd.isna(iv): iv = 0.40
+                    delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
+                    delta_abs = abs(delta)
+                    
+                    if delta_abs < max_delta and delta_abs > 0.05:
+                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        strike = float(row['strike'])
+                        ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
+                        
+                        all_options.append({
+                            "dte": dte, 
+                            "strike": strike, 
+                            "delta": round(-delta_abs, 3),
+                            "premium": round(float(premium), 2), 
+                            "annualized_return": round(ar, 2),
+                            "type": "Put"
+                        })
+            except:
+                continue
+                
+        if not all_options: return None
         
-        t_years = dte / 365.0
-        r = 0.04 # 假設 4% 無風險利率
+        all_options.sort(key=lambda x: x['annualized_return'], reverse=True)
         
-        deltas = []
-        for idx, row in otm_puts.iterrows():
-            iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.40
-            delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
-            deltas.append(abs(delta))
-            
-        otm_puts['delta_abs'] = deltas
         results = []
-        selected_strikes = set()
-        for target_delta in target_deltas:
-            available_puts = otm_puts[~otm_puts['strike'].isin(selected_strikes)].copy()
-            if available_puts.empty: break
-            
-            available_puts['delta_dist'] = (available_puts['delta_abs'] - target_delta).abs()
-            best_put = available_puts.sort_values('delta_dist').iloc[0]
-            
-            premium = (best_put['bid'] + best_put['ask']) / 2 if best_put['bid'] > 0 else best_put['lastPrice']
-            strike = float(best_put['strike'])
-            selected_strikes.add(strike)
-            ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
-            
-            results.append({
-                "dte": dte, 
-                "strike": strike, 
-                "delta": round(-best_put['delta_abs'], 3),
-                "premium": round(float(premium), 2), 
-                "annualized_return": round(ar, 2),
-                "type": "Put"
-            })
-            
+        seen_strikes = set()
+        for opt in all_options:
+            if opt['strike'] not in seen_strikes:
+                seen_strikes.add(opt['strike'])
+                results.append(opt)
+                if len(results) >= 2:
+                    break
         return results
     except Exception as e:
         return None
 
-def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
-    """從 yfinance 取得真實 Covered Call 候選合約 (尋找最接近目標 Delta)"""
+def get_real_call_option(symbol: str, current_price: float, cost_basis: float, max_delta: float = 0.3, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
+        import datetime
+        import pandas as pd
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
@@ -206,56 +213,59 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, t
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 10 <= d[1] <= 45]
         
         if not target_dates:
             best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
             target_dates = [best_match]
             
-        best_date, dte = target_dates[0]
-        opt = ticker.option_chain(best_date)
-        calls = opt.calls
-        
-        min_strike = max(current_price, cost_basis)
-        otm_calls = calls[calls['strike'] >= min_strike].copy()
-        if otm_calls.empty: return None
-        
-        t_years = dte / 365.0
+        all_options = []
         r = 0.04
         
-        deltas = []
-        for idx, row in otm_calls.iterrows():
-            iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.40
-            delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
-            deltas.append(delta)
-            
-        otm_calls['delta'] = deltas
+        for date_str, dte in target_dates:
+            try:
+                opt = ticker.option_chain(date_str)
+                calls = opt.calls
+                
+                min_strike = max(current_price, cost_basis)
+                otm_calls = calls[calls['strike'] >= min_strike].copy()
+                if otm_calls.empty: continue
+                
+                t_years = dte / 365.0
+                
+                for idx, row in otm_calls.iterrows():
+                    iv = row['impliedVolatility']
+                    if iv == 0 or pd.isna(iv): iv = 0.40
+                    delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
+                    
+                    if delta < max_delta and delta > 0.05:
+                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        strike = float(row['strike'])
+                        ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
+                        
+                        all_options.append({
+                            "dte": dte, 
+                            "strike": strike, 
+                            "delta": round(delta, 3),
+                            "premium": round(float(premium), 2), 
+                            "annualized_return": round(ar, 2),
+                            "type": "Call"
+                        })
+            except:
+                continue
+                
+        if not all_options: return None
+        
+        all_options.sort(key=lambda x: x['annualized_return'], reverse=True)
+        
         results = []
-        selected_strikes = set()
-        for target_delta in target_deltas:
-            available_calls = otm_calls[~otm_calls['strike'].isin(selected_strikes)].copy()
-            if available_calls.empty: break
-            
-            available_calls['delta_dist'] = (available_calls['delta'] - target_delta).abs()
-            best_call = available_calls.sort_values('delta_dist').iloc[0]
-            
-            premium = (best_call['bid'] + best_call['ask']) / 2 if best_call['bid'] > 0 else best_call['lastPrice']
-            strike = float(best_call['strike'])
-            selected_strikes.add(strike)
-            # CC Annualized return is typically calculated on the current price or cost basis
-            # Let's use current_price for standard yield
-            ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
-            
-            results.append({
-                "dte": dte, 
-                "strike": strike, 
-                "delta": round(best_call['delta'], 3),
-                "premium": round(float(premium), 2), 
-                "annualized_return": round(ar, 2),
-                "type": "Call"
-            })
-            
+        seen_strikes = set()
+        for opt in all_options:
+            if opt['strike'] not in seen_strikes:
+                seen_strikes.add(opt['strike'])
+                results.append(opt)
+                if len(results) >= 2:
+                    break
         return results
     except Exception as e:
         return None
@@ -426,17 +436,15 @@ with tab3:
             st.markdown("**Sell Put (觀察清單) 條件**")
             sp_rsi_threshold = st.number_input("RSI 低於此值 (超賣)", value=45, step=1, max_value=100, min_value=0)
             sp_iv_threshold = st.number_input("IV (%) 高於此值", value=30.0, step=1.0, min_value=0.0)
-            sp_target_deltas_str = st.text_input("Sell Put 目標 Delta (逗號分隔)", value="0.15, 0.25")
+            sp_max_delta = st.number_input("Sell Put 最大 Delta (絕對值)", value=0.30, step=0.01, min_value=0.01, max_value=0.50)
             sp_avoid_earnings = st.checkbox("避開財報日 (推薦合約不跨越財報)", value=True, key="sp_earn")
-            sp_target_deltas = [float(x.strip()) for x in sp_target_deltas_str.split(",")]
             
         with col_cc:
             st.markdown("**Covered Call (現貨庫存) 條件**")
             cc_rsi_threshold = st.number_input("RSI 高於此值 (超買)", value=70, step=1, max_value=100, min_value=0)
             cc_iv_threshold = st.number_input("IV (%) 高於此值 (CC)", value=30.0, step=1.0, min_value=0.0)
-            cc_target_deltas_str = st.text_input("Covered Call 目標 Delta (逗號分隔)", value="0.15, 0.25")
+            cc_max_delta = st.number_input("Covered Call 最大 Delta (絕對值)", value=0.30, step=0.01, min_value=0.01, max_value=0.50)
             cc_avoid_earnings = st.checkbox("避開財報日 (推薦合約不跨越財報)", value=False, key="cc_earn")
-            cc_target_deltas = [float(x.strip()) for x in cc_target_deltas_str.split(",")]
 
     if st.button("🔍 開始掃描訊號", use_container_width=True, type="primary"):
         with st.spinner("掃描中，請稍候..."):
@@ -453,7 +461,7 @@ with tab3:
                 # 根據使用者設定的條件進行判斷
                 if rsi < sp_rsi_threshold and iv > sp_iv_threshold:
                     earnings_date = get_next_earnings(symbol)
-                    options = get_real_put_option(symbol, price, sp_target_deltas, sp_avoid_earnings, earnings_date)
+                    options = get_real_put_option(symbol, price, sp_max_delta, sp_avoid_earnings, earnings_date)
                     if not options: continue
                     
                     earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
@@ -488,7 +496,7 @@ with tab3:
                 # 根據使用者設定的條件進行判斷
                 if rsi > cc_rsi_threshold and iv > cc_iv_threshold:
                     earnings_date = get_next_earnings(symbol)
-                    options = get_real_call_option(symbol, price, cost_basis, cc_target_deltas, cc_avoid_earnings, earnings_date)
+                    options = get_real_call_option(symbol, price, cost_basis, cc_max_delta, cc_avoid_earnings, earnings_date)
                     if not options: continue
                     
                     earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""

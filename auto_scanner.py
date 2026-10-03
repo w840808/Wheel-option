@@ -103,111 +103,148 @@ def get_next_earnings(symbol: str):
         pass
     return None
 
-def get_real_put_option(symbol: str, current_price: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
+def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.3, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
+        import datetime
+        import pandas as pd
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
+        
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
+        
         if avoid_earnings and earnings_date:
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 10 <= d[1] <= 45]
+        
         if not target_dates:
-            target_dates = [min(valid_dates, key=lambda x: abs(x[1] - 30))]
-        best_date, dte = target_dates[0]
-        opt = ticker.option_chain(best_date)
-        puts = opt.puts
-        otm_puts = puts[puts['strike'] < current_price].copy()
-        if otm_puts.empty: return None
-        t_years = dte / 365.0
-        deltas = []
-        for idx, row in otm_puts.iterrows():
-            iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.40
-            deltas.append(abs(calculate_bs_delta(current_price, row['strike'], t_years, 0.04, iv, "put")))
-        otm_puts['delta_abs'] = deltas
+            best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
+            target_dates = [best_match]
+            
+        all_options = []
+        r = 0.04
+        
+        for date_str, dte in target_dates:
+            try:
+                opt = ticker.option_chain(date_str)
+                puts = opt.puts
+                otm_puts = puts[puts['strike'] < current_price].copy()
+                if otm_puts.empty: continue
+                
+                t_years = dte / 365.0
+                
+                for idx, row in otm_puts.iterrows():
+                    iv = row['impliedVolatility']
+                    if iv == 0 or pd.isna(iv): iv = 0.40
+                    delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
+                    delta_abs = abs(delta)
+                    
+                    if delta_abs < max_delta and delta_abs > 0.05:
+                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        strike = float(row['strike'])
+                        ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
+                        
+                        all_options.append({
+                            "dte": dte, 
+                            "strike": strike, 
+                            "delta": round(-delta_abs, 3),
+                            "premium": round(float(premium), 2), 
+                            "annualized_return": round(ar, 2),
+                            "type": "Put"
+                        })
+            except:
+                continue
+                
+        if not all_options: return None
+        
+        all_options.sort(key=lambda x: x['annualized_return'], reverse=True)
+        
         results = []
-        selected_strikes = set()
-        for target_delta in target_deltas:
-            # 排除已經選過的履約價
-            available_puts = otm_puts[~otm_puts['strike'].isin(selected_strikes)].copy()
-            if available_puts.empty: break
-            
-            available_puts['delta_dist'] = (available_puts['delta_abs'] - target_delta).abs()
-            best_put = available_puts.sort_values('delta_dist').iloc[0]
-            
-            premium = (best_put['bid'] + best_put['ask']) / 2 if best_put['bid'] > 0 else best_put['lastPrice']
-            strike = float(best_put['strike'])
-            selected_strikes.add(strike)
-            
-            ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
-            results.append({"dte": dte, "strike": strike, "delta": round(-best_put['delta_abs'], 3), "premium": round(float(premium), 2), "annualized_return": round(ar, 2), "type": "Put"})
+        seen_strikes = set()
+        for opt in all_options:
+            if opt['strike'] not in seen_strikes:
+                seen_strikes.add(opt['strike'])
+                results.append(opt)
+                if len(results) >= 2:
+                    break
         return results
-    except:
+    except Exception as e:
         return None
 
-def get_real_call_option(symbol: str, current_price: float, cost_basis: float, target_deltas: list = [0.15, 0.25], avoid_earnings: bool = False, earnings_date: datetime.date = None):
+def get_real_call_option(symbol: str, current_price: float, cost_basis: float, max_delta: float = 0.3, avoid_earnings: bool = False, earnings_date: datetime.date = None):
     try:
+        import datetime
+        import pandas as pd
         ticker = yf.Ticker(symbol)
         expirations = ticker.options
         if not expirations: return None
+            
         today = datetime.date.today()
         valid_dates = [(d, (datetime.datetime.strptime(d, "%Y-%m-%d").date() - today).days) for d in expirations]
+        
         if avoid_earnings and earnings_date:
             valid_dates = [d for d in valid_dates if datetime.datetime.strptime(d[0], "%Y-%m-%d").date() < earnings_date]
         if not valid_dates: return None
         
-        target_dates = [d for d in valid_dates if 14 <= d[1] <= 45]
+        target_dates = [d for d in valid_dates if 10 <= d[1] <= 45]
+        
         if not target_dates:
-            target_dates = [min(valid_dates, key=lambda x: abs(x[1] - 30))]
-        best_date, dte = target_dates[0]
-        opt = ticker.option_chain(best_date)
-        calls = opt.calls
-        min_strike = max(current_price, cost_basis)
-        otm_calls = calls[calls['strike'] >= min_strike].copy()
-        if otm_calls.empty: return None
-        t_years = dte / 365.0
-        deltas = []
-        for idx, row in otm_calls.iterrows():
-            iv = row['impliedVolatility']
-            if iv == 0 or pd.isna(iv): iv = 0.40
-            deltas.append(calculate_bs_delta(current_price, row['strike'], t_years, 0.04, iv, "call"))
-        otm_calls['delta'] = deltas
+            best_match = min(valid_dates, key=lambda x: abs(x[1] - 30))
+            target_dates = [best_match]
+            
+        all_options = []
+        r = 0.04
+        
+        for date_str, dte in target_dates:
+            try:
+                opt = ticker.option_chain(date_str)
+                calls = opt.calls
+                
+                min_strike = max(current_price, cost_basis)
+                otm_calls = calls[calls['strike'] >= min_strike].copy()
+                if otm_calls.empty: continue
+                
+                t_years = dte / 365.0
+                
+                for idx, row in otm_calls.iterrows():
+                    iv = row['impliedVolatility']
+                    if iv == 0 or pd.isna(iv): iv = 0.40
+                    delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
+                    
+                    if delta < max_delta and delta > 0.05:
+                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        strike = float(row['strike'])
+                        ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
+                        
+                        all_options.append({
+                            "dte": dte, 
+                            "strike": strike, 
+                            "delta": round(delta, 3),
+                            "premium": round(float(premium), 2), 
+                            "annualized_return": round(ar, 2),
+                            "type": "Call"
+                        })
+            except:
+                continue
+                
+        if not all_options: return None
+        
+        all_options.sort(key=lambda x: x['annualized_return'], reverse=True)
+        
         results = []
-        selected_strikes = set()
-        for target_delta in target_deltas:
-            available_calls = otm_calls[~otm_calls['strike'].isin(selected_strikes)].copy()
-            if available_calls.empty: break
-            
-            available_calls['delta_dist'] = (available_calls['delta'] - target_delta).abs()
-            best_call = available_calls.sort_values('delta_dist').iloc[0]
-            
-            premium = (best_call['bid'] + best_call['ask']) / 2 if best_call['bid'] > 0 else best_call['lastPrice']
-            strike = float(best_call['strike'])
-            selected_strikes.add(strike)
-            
-            ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
-            results.append({"dte": dte, "strike": strike, "delta": round(best_call['delta'], 3), "premium": round(float(premium), 2), "annualized_return": round(ar, 2), "type": "Call"})
+        seen_strikes = set()
+        for opt in all_options:
+            if opt['strike'] not in seen_strikes:
+                seen_strikes.add(opt['strike'])
+                results.append(opt)
+                if len(results) >= 2:
+                    break
         return results
-    except:
+    except Exception as e:
         return None
-
-def send_telegram_message(message: str):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram 推播失敗: {e}")
-
-def log_signal_to_db(symbol: str, signal_type: str, details: str):
-    try:
-        supabase.table("signal_logs").insert({"symbol": symbol, "signal_type": signal_type, "details": details}).execute()
-    except Exception as e:
-        print(f"日誌寫入失敗: {e}")
 
 # ==========================================
 # 掃描任務主程式
@@ -232,7 +269,7 @@ def run_scan():
             
             if rsi < SP_RSI_THRESH and iv > SP_IV_THRESH:
                 earnings_date = get_next_earnings(symbol)
-                options = get_real_put_option(symbol, price, [0.15, 0.25], SP_AVOID_EARNINGS, earnings_date)
+                options = get_real_put_option(symbol, price, 0.30, SP_AVOID_EARNINGS, earnings_date)
                 if not options: continue
                 earn_str = f"\n⚠️ <b>下次財報日：{earnings_date}</b>" if earnings_date else ""
                 
@@ -250,7 +287,7 @@ def run_scan():
                 )
                 send_telegram_message(msg)
                 log_signal_to_db(symbol, "SP_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
-                print(f"✅ 已推播 {symbol} Sell Put 訊號")
+                print(f"[OK] 已推播 {symbol} Sell Put 訊號")
 
     # 2. 掃描 Covered Call
     portfolio = supabase.table("portfolio").select("*").execute().data
@@ -282,7 +319,7 @@ def run_scan():
                 )
                 send_telegram_message(msg)
                 log_signal_to_db(symbol, "CC_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
-                print(f"✅ 已推播 {symbol} Covered Call 訊號")
+                print(f"[OK] 已推播 {symbol} Covered Call 訊號")
                 
     print(f"[{datetime.datetime.now()}] 掃描任務完成！")
 
