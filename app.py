@@ -324,7 +324,7 @@ def log_signal_to_db(symbol: str, signal_type: str, details: str):
 # ==========================================
 # 3. 頁面與 UI 介面設計
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["📋 觀察清單 (Sell Put)", "💼 現貨庫存 (Covered Call)", "🚀 訊號掃描與日誌"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 觀察清單 (Sell Put)", "💼 現貨庫存 (Covered Call)", "🚀 訊號推播與日誌", "🎯 活躍部位 (Active Options)", "📊 歷史損益 (Trade History)"])
 
 # ----------------- Tab 1: Watchlist -----------------
 with tab1:
@@ -365,18 +365,24 @@ with tab1:
                     "下期財報日": str(earn_date) if earn_date else "N/A"
                 })
                 
-            df_wl = pd.DataFrame(display_data)
-            st.dataframe(df_wl.drop(columns=["ID"]), use_container_width=True, hide_index=True)
-        
-        st.divider()
-        st.markdown("### 🔧 管理清單")
-        for row in display_data:
-            col1, col2 = st.columns([4, 1])
-            col1.markdown(f"**{row['標的']}**")
-            if col2.button("刪除", key=f"del_wl_{row['ID']}"):
-                supabase.table("watchlist").delete().eq("id", row['ID']).execute()
-                st.rerun()
-            st.divider()
+            for row in display_data:
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns([2,2,2,3,2])
+                    c1.metric("標的", row['標的'])
+                    c2.metric("最新股價", row['最新股價'])
+                    
+                    rsi_val = row['14日 RSI']
+                    c3.metric("RSI", f"{rsi_val} 🚨" if isinstance(rsi_val, (int, float)) and rsi_val < 30 else rsi_val)
+                    
+                    iv_val = row['IV Rank (%)']
+                    c4.metric("IV Rank", f"{iv_val}% 🔥" if isinstance(iv_val, (int, float)) and iv_val > 50 else (f"{iv_val}%" if iv_val != 'N/A' else 'N/A'), help=f"財報: {row['下期財報日']}")
+                    
+                    with c5:
+                        st.write("")
+                        st.write("")
+                        if st.button("🗑️ 刪除", key=f"del_wl_{row['ID']}", use_container_width=True):
+                            supabase.table("watchlist").delete().eq("id", row['ID']).execute()
+                            st.rerun()
     else:
         st.info("目前觀察清單為空。")
 
@@ -432,19 +438,22 @@ with tab2:
                     "下期財報日": str(earn_date) if earn_date else "N/A"
                 })
                 
-            df_pf = pd.DataFrame(display_data)
-            st.dataframe(df_pf.drop(columns=["ID"]), use_container_width=True, hide_index=True)
-        
-        st.divider()
-        st.markdown("### 🔧 管理庫存")
-        for row in display_data:
-            col1, col2, col3 = st.columns([2, 2, 1])
-            col1.markdown(f"**{row['標的']}**")
-            col2.markdown(f"成本價: **{row['持股成本']}**")
-            if col3.button("刪除", key=f"del_pf_{row['ID']}"):
-                supabase.table("portfolio").delete().eq("id", row['ID']).execute()
-                st.rerun()
-            st.divider()
+            for row in display_data:
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 2])
+                    c1.metric("標的", row['標的'])
+                    c2.metric("持股成本", row['持股成本'])
+                    c3.metric("未實現損益", row['未實現損益'])
+                    
+                    rsi_val = row['14日 RSI']
+                    c4.metric("RSI", f"{rsi_val} 🚨" if isinstance(rsi_val, (int, float)) and rsi_val > 70 else rsi_val)
+                    
+                    with c5:
+                        st.write("")
+                        st.write("")
+                        if st.button("🗑️ 刪除", key=f"del_pf_{row['ID']}", use_container_width=True):
+                            supabase.table("portfolio").delete().eq("id", row['ID']).execute()
+                            st.rerun()
     else:
         st.info("目前庫存清單為空。")
 
