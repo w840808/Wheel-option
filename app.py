@@ -637,14 +637,83 @@ with tab4:
             st.dataframe(df_ao.drop(columns=["ID"]), use_container_width=True, hide_index=True)
             
             st.divider()
-            st.markdown("### 平倉 / 刪除部位")
-            for row in display_ao:
-                col1, col2 = st.columns([4, 1])
-                col1.markdown(f"**{row['標的']}** {row['到期日']} ${row['履約價']} {row['類型']}")
-                if col2.button("平倉刪除", key=f"del_ao_{row['ID']}"):
-                    supabase.table("active_options").delete().eq("id", row['ID']).execute()
-                    st.rerun()
+            st.markdown("### 結算平倉 (Close Position)")
+            close_options = {f"{r['symbol']} {r['expiration_date']} ${r['strike']} {r['option_type']}": r for r in active_data}
+            
+            with st.form("close_position_form"):
+                selected_pos_str = st.selectbox("選擇要平倉的部位", list(close_options.keys()))
+                close_price = st.number_input("平倉買回權利金 (單口成本，若到期失效歸零請輸入 0)", min_value=0.0, step=0.01, value=0.0)
+                submitted_close = st.form_submit_button("確認平倉並記錄損益")
+                
+                if submitted_close and selected_pos_str:
+                    pos = close_options[selected_pos_str]
+                    qty = int(pos['quantity'])
+                    premium_rec = float(pos['premium_received'])
+                    # 每口 100 股
+                    pnl = (premium_rec - close_price) * 100 * qty
+                    
+                    try:
+                        # 1. 新增到 trade_history
+                        supabase.table("trade_history").insert({
+                            "symbol": pos['symbol'],
+                            "option_type": pos['option_type'],
+                            "strike": pos['strike'],
+                            "expiration_date": pos['expiration_date'],
+                            "open_date": pos['open_date'],
+                            "premium_received": premium_rec,
+                            "premium_paid": close_price,
+                            "quantity": qty,
+                            "pnl": pnl
+                        }).execute()
+                        
+                        # 2. 從 active_options 刪除
+                        supabase.table("active_options").delete().eq("id", pos['id']).execute()
+                        
+                        st.success(f"平倉成功！該筆交易總損益為: ${pnl:.2f}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"結算平倉失敗，請確定 trade_history 表格已建立: {e}")
         else:
             st.info("目前沒有任何活躍部位。")
     except Exception as e:
-        st.error(f"讀取活躍部位失敗 (請確認 Supabase 資料表是否已建立): {e}")
+        st.error(f"讀取活躍部位失敗: {e}")
+
+# ----------------- Tab 5: Trade History -----------------
+with tab5:
+    st.subheader("📊 歷史損益與交易紀錄 (Trade History)")
+    try:
+        history_data = supabase.table("trade_history").select("*").order("close_date", desc=True).execute().data
+        if history_data:
+            display_hist = []
+            total_pnl = 0.0
+            
+            for row in history_data:
+                pnl = float(row['pnl'])
+                total_pnl += pnl
+                display_hist.append({
+                    "平倉日": row['close_date'],
+                    "標的": row['symbol'],
+                    "類型": row['option_type'],
+                    "履約價": float(row['strike']),
+                    "到期日": row['expiration_date'],
+                    "建倉權利金": float(row['premium_received']),
+                    "平倉權利金": float(row['premium_paid']),
+                    "口數": int(row['quantity']),
+                    "單筆損益": pnl
+                })
+                
+            st.metric("累積已實現損益 (Total Realized P&L)", f"${total_pnl:.2f}")
+            
+            df_hist = pd.DataFrame(display_hist)
+            # 將單筆損益依照正負加上顏色
+            def color_pnl(val):
+                color = 'green' if val > 0 else 'red' if val < 0 else 'white'
+                return f'color: {color}'
+            st.dataframe(df_hist.style.applymap(color_pnl, subset=['單筆損益']), use_container_width=True, hide_index=True)
+            
+        else:
+            st.info("目前尚無平倉歷史紀錄。")
+    except Exception as e:
+        st.error(f"讀取歷史紀錄失敗 (請確認 trade_history 資料表是否已建立): {e}")
+
+
