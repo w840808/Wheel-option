@@ -618,32 +618,93 @@ with tab4:
     try:
         active_data = supabase.table("active_options").select("*").order("created_at", desc=True).execute().data
         if active_data:
-            st.markdown("### 目前持有部位")
+            st.markdown("### 📊 目前持有部位狀態")
             display_ao = []
-            for row in active_data:
-                exp_date = datetime.datetime.strptime(row['expiration_date'], "%Y-%m-%d").date()
-                dte = (exp_date - datetime.date.today()).days
-                
-                warning = ""
-                if 0 < dte <= 21:
-                    warning = "⚠️ 建議轉倉"
-                elif dte <= 0:
-                    warning = "🚨 已到期"
+            
+            with st.spinner("抓取最新合約報價中..."):
+                for row in active_data:
+                    sym = row['symbol']
+                    strike = float(row['strike'])
+                    exp_date_str = row['expiration_date']
+                    opt_type = row['option_type'].lower()
+                    premium_rec = float(row['premium_received'])
                     
-                display_ao.append({
-                    "ID": row['id'],
-                    "標的": row['symbol'],
-                    "類型": row['option_type'],
-                    "履約價": float(row['strike']),
-                    "到期日": row['expiration_date'],
-                    "DTE": dte,
-                    "狀態": warning,
-                    "權利金": float(row['premium_received']),
-                    "口數": int(row['quantity'])
-                })
-                
-            df_ao = pd.DataFrame(display_ao)
-            st.dataframe(df_ao.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+                    exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                    dte = (exp_date - datetime.date.today()).days
+                    
+                    # 抓取即時市價
+                    current_price = 0.0
+                    current_ask = 0.0
+                    try:
+                        ticker = yf.Ticker(sym)
+                        opt = ticker.option_chain(exp_date_str)
+                        chain = opt.puts if opt_type == 'put' else opt.calls
+                        match = chain[chain['strike'] == strike]
+                        if not match.empty:
+                            bid = match.iloc[0]['bid']
+                            ask = match.iloc[0]['ask']
+                            last = match.iloc[0]['lastPrice']
+                            current_ask = ask if not pd.isna(ask) and ask > 0 else last
+                            current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0) else last
+                    except Exception:
+                        pass
+                    
+                    # 狀態判定 (保守估計用 Ask 計算停利，避免滑價)
+                    status_list = []
+                    profit_pct = 0.0
+                    
+                    if current_ask > 0:
+                        profit_pct = ((premium_rec - current_ask) / premium_rec) * 100
+                        if profit_pct >= 50:
+                            status_list.append("🎯 建議停利 (>50%)")
+                        elif profit_pct < -50:
+                            status_list.append("📉 嚴重浮虧")
+                    
+                    if 0 < dte <= 21:
+                        status_list.append("⚠️ 建議轉倉 (DTE≤21)")
+                    elif dte <= 0:
+                        status_list.append("🚨 已到期")
+                        
+                    status_str = " | ".join(status_list) if status_list else "🟢 持有中"
+                        
+                    display_ao.append({
+                        "ID": row['id'],
+                        "symbol": sym,
+                        "type": row['option_type'],
+                        "strike": strike,
+                        "exp": exp_date_str,
+                        "dte": dte,
+                        "status": status_str,
+                        "premium": premium_rec,
+                        "current_price": current_price,
+                        "current_ask": current_ask,
+                        "profit_pct": profit_pct,
+                        "qty": int(row['quantity'])
+                    })
+            
+            # 使用卡片來美化呈現
+            for ao in display_ao:
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 2])
+                    c1.markdown(f"**{ao['symbol']}** ${ao['strike']} {ao['type']}")
+                    c1.caption(f"到期日: {ao['exp']} ({ao['dte']}天)")
+                    
+                    c2.metric("收取權利金", f"${ao['premium']:.2f}")
+                    
+                    # 以 Mid Price 顯示現價，但 tooltip 標示 Ask
+                    c3.metric("當前中價 (Mid)", f"${ao['current_price']:.2f}" if ao['current_price'] > 0 else "N/A", help=f"賣價 (Ask): ${ao['current_ask']:.2f}")
+                    
+                    # 損益百分比
+                    pct_str = f"{ao['profit_pct']:.1f}%" if ao['current_ask'] > 0 else "N/A"
+                    c4.metric("目前狀態與建議", ao['status'], delta=pct_str if pct_str != "N/A" else None)
+                    
+                    with c5:
+                        st.write("")
+                        st.write("")
+                        # 如果是建議停利，按鈕變更明顯
+                        btn_type = "primary" if "建議停利" in ao['status'] else "secondary"
+                        # 這裡的平倉將導引他去下方的結算表單 (因此按鈕只做為視覺提醒，或直接帶入下方的表單)
+                        st.markdown(f"*口數: {ao['qty']}*")
             
             st.divider()
             st.markdown("### 結算平倉 (Close Position)")
