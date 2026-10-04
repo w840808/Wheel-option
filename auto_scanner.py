@@ -139,11 +139,22 @@ def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.
                 for idx, row in otm_puts.iterrows():
                     iv = row['impliedVolatility']
                     if iv == 0 or pd.isna(iv): iv = 0.40
+                    
+                    bid = row['bid']
+                    ask = row['ask']
+                    oi = row['openInterest']
+                    
+                    # 流動性與價差過濾 (Liquidity & Spread Filters)
+                    if pd.isna(bid) or bid <= 0: continue
+                    if pd.isna(oi) or oi < 10: continue
+                    # 若價差大於 $0.20 且價差比例超過 30%，則視為流動性過差跳過
+                    if (ask - bid) > 0.20 and (ask - bid) / bid > 0.30: continue
+                    
                     delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
                     delta_abs = abs(delta)
                     
                     if delta_abs < max_delta and delta_abs > 0.05:
-                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        premium = (bid + ask) / 2
                         strike = float(row['strike'])
                         ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
                         
@@ -153,7 +164,8 @@ def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.
                             "delta": round(-delta_abs, 3),
                             "premium": round(float(premium), 2), 
                             "annualized_return": round(ar, 2),
-                            "type": "Put"
+                            "type": "Put",
+                            "oi": oi
                         })
             except:
                 continue
@@ -212,10 +224,20 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
                 for idx, row in otm_calls.iterrows():
                     iv = row['impliedVolatility']
                     if iv == 0 or pd.isna(iv): iv = 0.40
+                    
+                    bid = row['bid']
+                    ask = row['ask']
+                    oi = row['openInterest']
+                    
+                    # 流動性與價差過濾 (Liquidity & Spread Filters)
+                    if pd.isna(bid) or bid <= 0: continue
+                    if pd.isna(oi) or oi < 10: continue
+                    if (ask - bid) > 0.20 and (ask - bid) / bid > 0.30: continue
+                    
                     delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
                     
                     if delta < max_delta and delta > 0.05:
-                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        premium = (bid + ask) / 2
                         strike = float(row['strike'])
                         ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
                         
@@ -225,7 +247,8 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
                             "delta": round(delta, 3),
                             "premium": round(float(premium), 2), 
                             "annualized_return": round(ar, 2),
-                            "type": "Call"
+                            "type": "Call",
+                            "oi": oi
                         })
             except:
                 continue
@@ -249,6 +272,60 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
 # ==========================================
 # 掃描任務主程式
 # ==========================================
+def check_active_options():
+    print(f"[{datetime.datetime.now()}] 開始檢查活躍選擇權倉位 (Take Profit / Rolling)...")
+    try:
+        active_options = supabase.table("active_options").select("*").execute().data
+        if not active_options:
+            return
+            
+        for position in active_options:
+            symbol = position['symbol']
+            strike = float(position['strike'])
+            exp_date_str = position['expiration_date']
+            opt_type = position['option_type'].lower()
+            premium_received = float(position['premium_received'])
+            
+            exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+            today = datetime.date.today()
+            dte = (exp_date - today).days
+            
+            # 1. 轉倉提醒 (恰好 21 DTE 時提醒一次)
+            if dte == 21:
+                msg = f"⚠️ <b>轉倉提醒 (21 DTE)</b>\n"
+                msg += f"標的: ${symbol}\n"
+                msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
+                msg += f"建議: 考慮平倉或向後延期 (Roll Out) 以降低 Gamma 風險！\n"
+                send_telegram_message(msg)
+                
+            if dte <= 0:
+                continue
+                
+            # 2. 停利檢查 (50% 最大利潤)
+            ticker = yf.Ticker(symbol)
+            try:
+                opt = ticker.option_chain(exp_date_str)
+                chain = opt.puts if opt_type == 'put' else opt.calls
+                match = chain[chain['strike'] == strike]
+                if not match.empty:
+                    current_bid = match.iloc[0]['bid']
+                    current_ask = match.iloc[0]['ask']
+                    # 賣出選擇權平倉是「買回」，看 Ask (如果沒有 Ask 看 lastPrice)
+                    current_price = current_ask if current_ask > 0 else match.iloc[0]['lastPrice']
+                    
+                    if current_price > 0 and current_price <= premium_received * 0.5:
+                        msg = f"🎯 <b>停利通知 (50% 獲利達標)</b>\n"
+                        msg += f"標的: ${symbol}\n"
+                        msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
+                        msg += f"當前平倉成本: ${current_price:.2f} (原收取: ${premium_received:.2f})\n"
+                        msg += f"建議: 利潤已達 50%，建議買回平倉釋放資金效率！\n"
+                        send_telegram_message(msg)
+            except Exception as e:
+                print(f"無法檢查 {symbol} 的合約: {e}")
+                
+    except Exception as e:
+        print(f"檢查活躍倉位發生錯誤 (可能尚未建立表格): {e}")
+
 def run_scan():
     print(f"[{datetime.datetime.now()}] 開始執行自動掃描任務...")
     

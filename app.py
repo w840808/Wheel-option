@@ -163,11 +163,22 @@ def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.
                 for idx, row in otm_puts.iterrows():
                     iv = row['impliedVolatility']
                     if iv == 0 or pd.isna(iv): iv = 0.40
+                    
+                    bid = row['bid']
+                    ask = row['ask']
+                    oi = row['openInterest']
+                    
+                    # 流動性與價差過濾 (Liquidity & Spread Filters)
+                    if pd.isna(bid) or bid <= 0: continue
+                    if pd.isna(oi) or oi < 10: continue
+                    # 若價差大於 $0.20 且價差比例超過 30%，則視為流動性過差跳過
+                    if (ask - bid) > 0.20 and (ask - bid) / bid > 0.30: continue
+                    
                     delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "put")
                     delta_abs = abs(delta)
                     
                     if delta_abs < max_delta and delta_abs > 0.05:
-                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        premium = (bid + ask) / 2
                         strike = float(row['strike'])
                         ar = (premium / strike) * (365 / dte) * 100 if strike > 0 and dte > 0 else 0
                         
@@ -177,7 +188,8 @@ def get_real_put_option(symbol: str, current_price: float, max_delta: float = 0.
                             "delta": round(-delta_abs, 3),
                             "premium": round(float(premium), 2), 
                             "annualized_return": round(ar, 2),
-                            "type": "Put"
+                            "type": "Put",
+                            "oi": oi
                         })
             except:
                 continue
@@ -236,10 +248,20 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
                 for idx, row in otm_calls.iterrows():
                     iv = row['impliedVolatility']
                     if iv == 0 or pd.isna(iv): iv = 0.40
+                    
+                    bid = row['bid']
+                    ask = row['ask']
+                    oi = row['openInterest']
+                    
+                    # 流動性與價差過濾 (Liquidity & Spread Filters)
+                    if pd.isna(bid) or bid <= 0: continue
+                    if pd.isna(oi) or oi < 10: continue
+                    if (ask - bid) > 0.20 and (ask - bid) / bid > 0.30: continue
+                    
                     delta = calculate_bs_delta(current_price, row['strike'], t_years, r, iv, "call")
                     
                     if delta < max_delta and delta > 0.05:
-                        premium = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        premium = (bid + ask) / 2
                         strike = float(row['strike'])
                         ar = (premium / current_price) * (365 / dte) * 100 if current_price > 0 and dte > 0 else 0
                         
@@ -249,7 +271,8 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
                             "delta": round(delta, 3),
                             "premium": round(float(premium), 2), 
                             "annualized_return": round(ar, 2),
-                            "type": "Call"
+                            "type": "Call",
+                            "oi": oi
                         })
             except:
                 continue
@@ -469,7 +492,7 @@ with tab3:
                     opts_msg = ""
                     for opt in options:
                         opts_msg += (f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Put</b>\n"
-                                     f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n")
+                                     f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b> (OI: {int(opt.get('oi', 0))})\n")
                     
                     msg = (
                         f"🚨 <b>Sell Put 訊號觸發！</b>\n"
@@ -504,7 +527,7 @@ with tab3:
                     opts_msg = ""
                     for opt in options:
                         opts_msg += (f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Call</b>\n"
-                                     f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n")
+                                     f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b> (OI: {int(opt.get('oi', 0))})\n")
                                      
                     msg = (
                         f"🎯 <b>Covered Call 訊號觸發！</b>\n"
