@@ -569,3 +569,82 @@ with tab3:
         st.dataframe(df_logs, use_container_width=True, hide_index=True)
     else:
         st.write("目前尚無觸發紀錄。")
+
+
+# ----------------- Tab 4: Active Options -----------------
+with tab4:
+    st.subheader("🎯 活躍選擇權部位管理")
+    
+    with st.form("add_active_option_form", clear_on_submit=True):
+        st.markdown("### 新增部位")
+        col1, col2, col3 = st.columns(3)
+        ao_symbol = col1.text_input("標的代碼 (例: TSLA)").upper().strip()
+        ao_type = col2.selectbox("合約類型", ["Put", "Call"])
+        ao_strike = col3.number_input("履約價", min_value=0.0, step=1.0)
+        
+        col4, col5, col6 = st.columns(3)
+        import datetime
+        ao_exp = col4.date_input("到期日", value=datetime.date.today() + datetime.timedelta(days=30))
+        ao_premium = col5.number_input("收取權利金 (單口)", min_value=0.0, step=0.01)
+        ao_qty = col6.number_input("口數", min_value=1, step=1)
+        
+        submitted_ao = st.form_submit_button("新增部位")
+        if submitted_ao and ao_symbol and ao_strike > 0 and ao_premium > 0:
+            try:
+                supabase.table("active_options").insert({
+                    "symbol": ao_symbol,
+                    "option_type": ao_type,
+                    "strike": float(ao_strike),
+                    "expiration_date": str(ao_exp),
+                    "premium_received": float(ao_premium),
+                    "quantity": int(ao_qty)
+                }).execute()
+                st.success(f"已新增 {ao_symbol} {ao_type} 部位")
+                st.rerun()
+            except Exception as e:
+                st.error(f"寫入資料庫失敗: {e}")
+
+    st.divider()
+    
+    try:
+        active_data = supabase.table("active_options").select("*").order("created_at", desc=True).execute().data
+        if active_data:
+            st.markdown("### 目前持有部位")
+            display_ao = []
+            for row in active_data:
+                exp_date = datetime.datetime.strptime(row['expiration_date'], "%Y-%m-%d").date()
+                dte = (exp_date - datetime.date.today()).days
+                
+                warning = ""
+                if 0 < dte <= 21:
+                    warning = "⚠️ 建議轉倉"
+                elif dte <= 0:
+                    warning = "🚨 已到期"
+                    
+                display_ao.append({
+                    "ID": row['id'],
+                    "標的": row['symbol'],
+                    "類型": row['option_type'],
+                    "履約價": float(row['strike']),
+                    "到期日": row['expiration_date'],
+                    "DTE": dte,
+                    "狀態": warning,
+                    "權利金": float(row['premium_received']),
+                    "口數": int(row['quantity'])
+                })
+                
+            df_ao = pd.DataFrame(display_ao)
+            st.dataframe(df_ao.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+            
+            st.divider()
+            st.markdown("### 平倉 / 刪除部位")
+            for row in display_ao:
+                col1, col2 = st.columns([4, 1])
+                col1.markdown(f"**{row['標的']}** {row['到期日']} ${row['履約價']} {row['類型']}")
+                if col2.button("平倉刪除", key=f"del_ao_{row['ID']}"):
+                    supabase.table("active_options").delete().eq("id", row['ID']).execute()
+                    st.rerun()
+        else:
+            st.info("目前沒有任何活躍部位。")
+    except Exception as e:
+        st.error(f"讀取活躍部位失敗 (請確認 Supabase 資料表是否已建立): {e}")
