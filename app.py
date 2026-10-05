@@ -653,7 +653,7 @@ with tab4:
                             else:
                                 debug_error = f"找不到履約價 {strike}"
                         else:
-                            debug_error = "找不到任何到期日"
+                            debug_error = f"Error: 找不到 {sym} 的到期日 (字串長度: {len(sym)}, 原始: '{row['symbol']}')"
                     except Exception as e:
                         debug_error = str(e)
                     
