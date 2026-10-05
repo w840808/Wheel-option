@@ -637,16 +637,22 @@ with tab4:
                     current_ask = 0.0
                     try:
                         ticker = yf.Ticker(sym)
-                        opt = ticker.option_chain(exp_date_str)
-                        chain = opt.puts if opt_type == 'put' else opt.calls
-                        match = chain[chain['strike'] == strike]
-                        if not match.empty:
-                            bid = match.iloc[0]['bid']
-                            ask = match.iloc[0]['ask']
-                            last = match.iloc[0]['lastPrice']
-                            current_ask = ask if not pd.isna(ask) and ask > 0 else last
-                            current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0) else last
-                    except Exception:
+                        available_exps = ticker.options
+                        if available_exps:
+                            # 找出最接近的到期日，避免手動輸入日期有誤差導致抓不到
+                            closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
+                            opt = ticker.option_chain(closest_exp)
+                            chain = opt.puts if opt_type == 'put' else opt.calls
+                            # 尋找履約價 (考慮浮點數誤差)
+                            match = chain[abs(chain['strike'] - strike) < 0.05]
+                            if not match.empty:
+                                bid = match.iloc[0]['bid']
+                                ask = match.iloc[0]['ask']
+                                last = match.iloc[0]['lastPrice']
+                                current_ask = ask if not pd.isna(ask) and ask > 0 else last
+                                # 如果 bid 或 ask 都是 0，則 fallback 到 last
+                                current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
+                    except Exception as e:
                         pass
                     
                     # 狀態判定 (保守估計用 Ask 計算停利，避免滑價)
@@ -713,7 +719,15 @@ with tab4:
             with st.form("close_position_form"):
                 selected_pos_str = st.selectbox("選擇要平倉的部位", list(close_options.keys()))
                 close_price = st.number_input("平倉買回權利金 (單口成本，若到期失效歸零請輸入 0)", min_value=0.0, step=0.01, value=0.0)
-                submitted_close = st.form_submit_button("確認平倉並記錄損益")
+                
+                is_roll = st.checkbox("🔄 這是轉倉 (Roll Out) 操作？ (結算當前部位，同時建立新部位)")
+                st.markdown("---")
+                colA, colB, colC = st.columns(3)
+                new_exp = colA.date_input("新合約到期日 (轉倉才需填寫)", value=datetime.date.today() + datetime.timedelta(days=30))
+                new_strike = colB.number_input("新合約履約價 (轉倉才需填寫)", min_value=0.0, step=1.0)
+                new_premium = colC.number_input("新收取權利金 (轉倉才需填寫)", min_value=0.0, step=0.01)
+                
+                submitted_close = st.form_submit_button("確認送出 (平倉/轉倉)")
                 
                 if submitted_close and selected_pos_str:
                     pos = close_options[selected_pos_str]
@@ -723,7 +737,7 @@ with tab4:
                     pnl = (premium_rec - close_price) * 100 * qty
                     
                     try:
-                        # 1. 新增到 trade_history
+                        # 1. 紀錄平倉到 trade_history
                         supabase.table("trade_history").insert({
                             "symbol": pos['symbol'],
                             "option_type": pos['option_type'],
@@ -736,13 +750,28 @@ with tab4:
                             "pnl": pnl
                         }).execute()
                         
-                        # 2. 從 active_options 刪除
+                        # 2. 如果是轉倉，建立新部位
+                        if is_roll and new_strike > 0 and new_premium > 0:
+                            supabase.table("active_options").insert({
+                                "symbol": pos['symbol'],
+                                "option_type": pos['option_type'],
+                                "strike": float(new_strike),
+                                "expiration_date": str(new_exp),
+                                "premium_received": float(new_premium),
+                                "quantity": qty
+                            }).execute()
+                        
+                        # 3. 刪除舊部位
                         supabase.table("active_options").delete().eq("id", pos['id']).execute()
                         
-                        st.success(f"平倉成功！該筆交易總損益為: ${pnl:.2f}")
+                        if is_roll:
+                            st.success(f"轉倉成功！舊合約平倉損益: ${pnl:.2f}。已為您建立新部位。")
+                        else:
+                            st.success(f"平倉成功！該筆交易總損益為: ${pnl:.2f}")
+                            
                         st.rerun()
                     except Exception as e:
-                        st.error(f"結算平倉失敗，請確定 trade_history 表格已建立: {e}")
+                        st.error(f"執行失敗，請確保 trade_history 等資料表存在: {e}")
         else:
             st.info("目前沒有任何活躍部位。")
     except Exception as e:
