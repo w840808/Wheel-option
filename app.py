@@ -681,7 +681,7 @@ with tab4:
         col4, col5, col6 = st.columns(3)
         import datetime
         ao_exp = col4.date_input("到期日", value=datetime.date.today() + datetime.timedelta(days=30))
-        ao_premium = col5.number_input("收取權利金 (單口)", min_value=0.0, step=0.01)
+        ao_premium = col5.number_input("收取權利金 (每股單價)", min_value=0.0, step=0.01)
         ao_qty = col6.number_input("口數", min_value=1, step=1)
         
         submitted_ao = st.form_submit_button("新增部位")
@@ -759,32 +759,39 @@ with tab4:
                         "debug_error": debug_error
                     })
             
-            # 使用卡片來美化呈現
-            for ao in display_ao:
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 2])
-                    c1.markdown(f"**{ao['symbol']}** ${ao['strike']} {ao['type']}")
-                    c1.caption(f"到期日: {ao['exp']} ({ao['dte']}天)")
-                    
-                    c2.metric("收取權利金", f"${ao['premium']:.2f}")
-                    
-                    # 以 Mid Price 顯示現價，但 tooltip 標示 Ask
-                    if ao['current_price'] > 0:
-                        c3.metric("當前中價 (Mid)", f"${ao['current_price']:.2f}", help=f"賣價 (Ask): ${ao['current_ask']:.2f}")
-                    else:
-                        c3.metric("當前中價 (Mid)", "N/A", help=ao.get('debug_error', '抓取失敗'))
-                    
-                    # 損益百分比
-                    pct_str = f"{ao['profit_pct']:.1f}%" if ao['current_ask'] > 0 else "N/A"
-                    c4.metric("目前狀態與建議", ao['status'], delta=pct_str if pct_str != "N/A" else None)
-                    
-                    with c5:
-                        st.write("")
-                        st.write("")
-                        # 如果是建議停利，按鈕變更明顯
-                        btn_type = "primary" if "建議停利" in ao['status'] else "secondary"
-                        # 這裡的平倉將導引他去下方的結算表單 (因此按鈕只做為視覺提醒，或直接帶入下方的表單)
-                        st.markdown(f"*口數: {ao['qty']}*")
+            import pandas as pd
+            df_ao = pd.DataFrame(display_ao)
+            st.caption("提示：您可以直接在表格中點擊『建倉權利金』的數字進行修改，修改後按下 Enter 即可自動存檔！")
+            
+            edited_ao = st.data_editor(
+                df_ao,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "ID": None,
+                    "debug_error": None,
+                    "symbol": "標的",
+                    "type": "類型",
+                    "strike": st.column_config.NumberColumn("履約價", format="$%.1f"),
+                    "exp": "到期日",
+                    "dte": "DTE(天)",
+                    "premium": st.column_config.NumberColumn("建倉權利金(✏️可改)", format="$%.2f"),
+                    "current_price": st.column_config.NumberColumn("中價(Mid)", format="$%.2f"),
+                    "current_ask": st.column_config.NumberColumn("賣價(Ask)", format="$%.2f"),
+                    "profit_pct": st.column_config.NumberColumn("獲利(%)", format="%.1f%%"),
+                    "qty": "口數",
+                    "status": "目前狀態"
+                },
+                disabled=["symbol", "type", "strike", "exp", "dte", "current_price", "current_ask", "profit_pct", "qty", "status"]
+            )
+            
+            # 偵測是否被修改
+            for idx, row in edited_ao.iterrows():
+                orig_row = df_ao.iloc[idx]
+                if row['premium'] != orig_row['premium']:
+                    supabase.table("active_options").update({"premium_received": row['premium']}).eq("id", row['ID']).execute()
+                    st.success(f"已將 {row['symbol']} 的權利金更新為 ${row['premium']}！")
+                    st.rerun()
             
             st.divider()
             st.markdown("### 🛠️ 部位管理 (平倉 / 轉倉)")
@@ -866,6 +873,7 @@ with tab5:
                 pnl = float(row['pnl'])
                 total_pnl += pnl
                 display_hist.append({
+                    "ID": row['id'],
                     "平倉日": row['close_date'],
                     "標的": row['symbol'],
                     "類型": row['option_type'],
@@ -878,13 +886,34 @@ with tab5:
                 })
                 
             st.metric("累積已實現損益 (Total Realized P&L)", f"${total_pnl:.2f}")
+            st.caption("提示：您可以直接在表格中點擊『建倉權利金』或『平倉權利金』進行修改，系統會自動重新計算單筆損益！")
             
             df_hist = pd.DataFrame(display_hist)
-            # 將單筆損益依照正負加上顏色
-            def color_pnl(val):
-                color = 'green' if val > 0 else 'red' if val < 0 else 'white'
-                return f'color: {color}'
-            st.dataframe(df_hist.style.map(color_pnl, subset=['單筆損益']) if hasattr(df_hist.style, 'map') else df_hist.style.applymap(color_pnl, subset=['單筆損益']), use_container_width=True, hide_index=True)
+            
+            edited_hist = st.data_editor(
+                df_hist,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "ID": None,
+                    "建倉權利金": st.column_config.NumberColumn("建倉權利金(✏️可改)", format="$%.2f"),
+                    "平倉權利金": st.column_config.NumberColumn("平倉權利金(✏️可改)", format="$%.2f"),
+                    "單筆損益": st.column_config.NumberColumn("單筆損益", format="$%.2f")
+                },
+                disabled=["平倉日", "標的", "類型", "履約價", "到期日", "口數", "單筆損益"]
+            )
+            
+            for idx, row in edited_hist.iterrows():
+                orig_row = df_hist.iloc[idx]
+                if row['建倉權利金'] != orig_row['建倉權利金'] or row['平倉權利金'] != orig_row['平倉權利金']:
+                    new_pnl = (row['建倉權利金'] - row['平倉權利金']) * 100 * row['口數']
+                    supabase.table("trade_history").update({
+                        "premium_received": row['建倉權利金'],
+                        "premium_paid": row['平倉權利金'],
+                        "pnl": new_pnl
+                    }).eq("id", row['ID']).execute()
+                    st.success("歷史紀錄已成功更新！")
+                    st.rerun()
             
         else:
             st.info("目前尚無平倉歷史紀錄。")
