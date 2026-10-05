@@ -769,7 +769,7 @@ with tab4:
                 colA, colB, colC = st.columns(3)
                 new_exp = colA.date_input("新合約到期日 (轉倉才需填寫)", value=datetime.date.today() + datetime.timedelta(days=30))
                 new_strike = colB.number_input("新合約履約價 (轉倉才需填寫)", min_value=0.0, step=1.0)
-                new_premium = colC.number_input("新收取權利金 (轉倉才需填寫)", min_value=0.0, step=0.01)
+                new_premium = colC.number_input("新收取權利金 (每股單價，轉倉才填)", min_value=0.0, step=0.01)
                 
                 submitted_close = st.form_submit_button("確認送出 (平倉/轉倉)")
                 
@@ -778,7 +778,8 @@ with tab4:
                     qty = int(pos['quantity'])
                     premium_rec = float(pos['premium_received'])
                     # 每口 100 股
-                    pnl = (premium_rec - close_price) * 100 * qty
+                    # 計算損益 (預設資料庫存的是每股單價，若當初不小心存成總價會失真)
+                                pnl = (premium_rec - close_price) * 100 * qty
                     
                     try:
                         # 1. 紀錄平倉到 trade_history
