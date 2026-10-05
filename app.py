@@ -422,33 +422,49 @@ with tab1:
                 price, rsi = calculate_rsi(sym)
                 ivr = get_iv_rank(sym)
                 earn_date = get_next_earnings(sym)
+                
+                status = "⚪ 觀望"
+                if isinstance(rsi, (int, float)) and rsi < 35:
+                    status = "🟢 嚴重超賣 (適合 Sell Put)"
+                elif isinstance(ivr, (int, float)) and ivr > 50:
+                    status = "🔥 IV 偏高 (權利金豐厚)"
+                    
                 display_data.append({
                     "ID": row['id'],
+                    "刪除": False,
                     "標的": sym,
-                    "最新股價": f"${price}" if price else "N/A",
-                    "14日 RSI": rsi if rsi else "N/A",
-                    "IV Rank (%)": ivr,
-                    "下期財報日": str(earn_date) if earn_date else "N/A"
+                    "最新股價": price if price else None,
+                    "14日 RSI": rsi if rsi else None,
+                    "IV Rank (%)": ivr if ivr != 'N/A' else None,
+                    "下期財報日": str(earn_date) if earn_date else "N/A",
+                    "狀態與建議": status
                 })
                 
-            for row in display_data:
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5 = st.columns([2,2,2,3,2])
-                    c1.metric("標的", row['標的'])
-                    c2.metric("最新股價", row['最新股價'])
-                    
-                    rsi_val = row['14日 RSI']
-                    c3.metric("RSI", f"{rsi_val} 🚨" if isinstance(rsi_val, (int, float)) and rsi_val < 30 else rsi_val)
-                    
-                    iv_val = row['IV Rank (%)']
-                    c4.metric("IV Rank", f"{iv_val}% 🔥" if isinstance(iv_val, (int, float)) and iv_val > 50 else (f"{iv_val}%" if iv_val != 'N/A' else 'N/A'), help=f"財報: {row['下期財報日']}")
-                    
-                    with c5:
-                        st.write("")
-                        st.write("")
-                        if st.button("🗑️ 刪除", key=f"del_wl_{row['ID']}", use_container_width=True):
-                            supabase.table("watchlist").delete().eq("id", row['ID']).execute()
-                            st.rerun()
+            import pandas as pd
+            df = pd.DataFrame(display_data)
+            
+            # 使用 Data Editor 呈現超美表格
+            edited_df = st.data_editor(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "ID": None, # 隱藏ID欄位
+                    "刪除": st.column_config.CheckboxColumn("勾選刪除", default=False),
+                    "最新股價": st.column_config.NumberColumn("最新股價", format="$%.2f"),
+                    "14日 RSI": st.column_config.NumberColumn("14日 RSI", format="%.2f"),
+                    "IV Rank (%)": st.column_config.NumberColumn("IV Rank (%)", format="%.1f%%")
+                },
+                disabled=["標的", "最新股價", "14日 RSI", "IV Rank (%)", "下期財報日", "狀態與建議"]
+            )
+            
+            to_delete = edited_df[edited_df["刪除"] == True]["ID"].tolist()
+            if len(to_delete) > 0:
+                if st.button("🗑️ 刪除選取的標的", type="primary"):
+                    for del_id in to_delete:
+                        supabase.table("watchlist").delete().eq("id", del_id).execute()
+                    st.success(f"已成功刪除標的！")
+                    st.rerun()
     else:
         st.info("目前觀察清單為空。")
 
@@ -487,39 +503,53 @@ with tab2:
                 ivr = get_iv_rank(sym)
                 earn_date = get_next_earnings(sym)
                 
-                pnl_str = "N/A"
+                pnl = None
+                pnl_pct = None
+                status = "⚪ 觀望"
                 if price:
-                    pnl = round(price - cost, 2)
-                    pnl_pct = round((pnl / cost) * 100, 2)
-                    pnl_str = f"${pnl} ({pnl_pct}%)"
+                    pnl = price - cost
+                    pnl_pct = (pnl / cost) * 100
                     
+                    if pnl_pct > 10.0 and (isinstance(rsi, (int, float)) and rsi > 65):
+                        status = "🔴 逢高 (適合 Covered Call)"
+                        
                 display_data.append({
                     "ID": row['id'],
+                    "刪除": False,
                     "標的": sym,
-                    "持股成本": f"${cost}",
-                    "最新股價": f"${price}" if price else "N/A",
-                    "未實現損益": pnl_str,
-                    "14日 RSI": rsi if rsi else "N/A",
-                    "IV Rank (%)": ivr,
-                    "下期財報日": str(earn_date) if earn_date else "N/A"
+                    "持股成本": cost,
+                    "最新股價": price if price else None,
+                    "未實現損益(%)": pnl_pct if pnl_pct is not None else None,
+                    "14日 RSI": rsi if rsi else None,
+                    "下期財報日": str(earn_date) if earn_date else "N/A",
+                    "狀態與建議": status
                 })
                 
-            for row in display_data:
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 2])
-                    c1.metric("標的", row['標的'])
-                    c2.metric("持股成本", row['持股成本'])
-                    c3.metric("未實現損益", row['未實現損益'])
-                    
-                    rsi_val = row['14日 RSI']
-                    c4.metric("RSI", f"{rsi_val} 🚨" if isinstance(rsi_val, (int, float)) and rsi_val > 70 else rsi_val)
-                    
-                    with c5:
-                        st.write("")
-                        st.write("")
-                        if st.button("🗑️ 刪除", key=f"del_pf_{row['ID']}", use_container_width=True):
-                            supabase.table("portfolio").delete().eq("id", row['ID']).execute()
-                            st.rerun()
+            import pandas as pd
+            df = pd.DataFrame(display_data)
+            
+            edited_df = st.data_editor(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "ID": None,
+                    "刪除": st.column_config.CheckboxColumn("勾選刪除", default=False),
+                    "持股成本": st.column_config.NumberColumn("持股成本", format="$%.2f"),
+                    "最新股價": st.column_config.NumberColumn("最新股價", format="$%.2f"),
+                    "未實現損益(%)": st.column_config.NumberColumn("未實現損益(%)", format="%.2f%%"),
+                    "14日 RSI": st.column_config.NumberColumn("14日 RSI", format="%.2f")
+                },
+                disabled=["標的", "持股成本", "最新股價", "未實現損益(%)", "14日 RSI", "下期財報日", "狀態與建議"]
+            )
+            
+            to_delete = edited_df[edited_df["刪除"] == True]["ID"].tolist()
+            if len(to_delete) > 0:
+                if st.button("🗑️ 刪除選取的庫存", type="primary"):
+                    for del_id in to_delete:
+                        supabase.table("portfolio").delete().eq("id", del_id).execute()
+                    st.success(f"已成功刪除庫存！")
+                    st.rerun()
     else:
         st.info("目前庫存清單為空。")
 
