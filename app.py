@@ -352,7 +352,7 @@ with tab1:
         with st.spinner("載入最新數據中..."):
             display_data = []
             for row in watchlist_data:
-                sym = row['symbol']
+                sym = row['symbol'].strip().upper()
                 price, rsi = calculate_rsi(sym)
                 ivr = get_iv_rank(sym)
                 earn_date = get_next_earnings(sym)
@@ -415,7 +415,7 @@ with tab2:
         with st.spinner("載入最新數據中..."):
             display_data = []
             for row in portfolio_data:
-                sym = row['symbol']
+                sym = row['symbol'].strip().upper()
                 cost = row['cost_basis']
                 price, rsi = calculate_rsi(sym)
                 ivr = get_iv_rank(sym)
@@ -623,7 +623,7 @@ with tab4:
             
             with st.spinner("抓取最新合約報價中..."):
                 for row in active_data:
-                    sym = row['symbol']
+                    sym = row['symbol'].strip().upper()
                     strike = float(row['strike'])
                     exp_date_str = row['expiration_date']
                     opt_type = row['option_type'].lower()
