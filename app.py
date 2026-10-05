@@ -635,25 +635,27 @@ with tab4:
                     # 抓取即時市價
                     current_price = 0.0
                     current_ask = 0.0
+                    debug_error = ""
                     try:
                         ticker = yf.Ticker(sym)
                         available_exps = ticker.options
                         if available_exps:
-                            # 找出最接近的到期日，避免手動輸入日期有誤差導致抓不到
                             closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
                             opt = ticker.option_chain(closest_exp)
                             chain = opt.puts if opt_type == 'put' else opt.calls
-                            # 尋找履約價 (考慮浮點數誤差)
                             match = chain[abs(chain['strike'] - strike) < 0.05]
                             if not match.empty:
                                 bid = match.iloc[0]['bid']
                                 ask = match.iloc[0]['ask']
                                 last = match.iloc[0]['lastPrice']
                                 current_ask = ask if not pd.isna(ask) and ask > 0 else last
-                                # 如果 bid 或 ask 都是 0，則 fallback 到 last
                                 current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
+                            else:
+                                debug_error = f"找不到履約價 {strike}"
+                        else:
+                            debug_error = "找不到任何到期日"
                     except Exception as e:
-                        pass
+                        debug_error = str(e)
                     
                     # 狀態判定 (保守估計用 Ask 計算停利，避免滑價)
                     status_list = []
@@ -685,7 +687,8 @@ with tab4:
                         "current_price": current_price,
                         "current_ask": current_ask,
                         "profit_pct": profit_pct,
-                        "qty": int(row['quantity'])
+                        "qty": int(row['quantity']),
+                        "debug_error": debug_error
                     })
             
             # 使用卡片來美化呈現
@@ -698,7 +701,10 @@ with tab4:
                     c2.metric("收取權利金", f"${ao['premium']:.2f}")
                     
                     # 以 Mid Price 顯示現價，但 tooltip 標示 Ask
-                    c3.metric("當前中價 (Mid)", f"${ao['current_price']:.2f}" if ao['current_price'] > 0 else "N/A", help=f"賣價 (Ask): ${ao['current_ask']:.2f}")
+                    if ao['current_price'] > 0:
+                        c3.metric("當前中價 (Mid)", f"${ao['current_price']:.2f}", help=f"賣價 (Ask): ${ao['current_ask']:.2f}")
+                    else:
+                        c3.metric("當前中價 (Mid)", "N/A", help=ao.get('debug_error', '抓取失敗'))
                     
                     # 損益百分比
                     pct_str = f"{ao['profit_pct']:.1f}%" if ao['current_ask'] > 0 else "N/A"
