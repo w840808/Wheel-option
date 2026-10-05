@@ -11,54 +11,63 @@ import math
 @st.cache_data(ttl=300)
 def fetch_option_prices(sym, strike, exp_date_str, opt_type):
     try:
-        import subprocess
-        import json
-        import sys
+        import requests
+        from datetime import datetime
         
-        script = f'''
-import yfinance as yf
-import datetime
-import pandas as pd
-import json
-
-try:
-    sym = "{sym}"
-    strike = {strike}
-    exp_date_str = "{exp_date_str}"
-    opt_type = "{opt_type}"
-
-    ticker = yf.Ticker(sym)
-    available_exps = ticker.options
-    if available_exps:
-        exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
-        closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
-        opt = ticker.option_chain(closest_exp)
-        chain = opt.puts if opt_type.lower() == 'put' else opt.calls
-        match = chain[abs(chain['strike'] - strike) < 0.05]
-        if not match.empty:
-            bid = match.iloc[0]['bid']
-            ask = match.iloc[0]['ask']
-            last = match.iloc[0]['lastPrice']
-            current_ask = ask if not pd.isna(ask) and ask > 0 else last
-            current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
-            print(json.dumps({{"price": float(current_price), "ask": float(current_ask), "error": ""}}))
-        else:
-            print(json.dumps({{"price": 0.0, "ask": 0.0, "error": f"找不到履約價 {{strike}}"}}))
-    else:
-        print(json.dumps({{"price": 0.0, "ask": 0.0, "error": f"找不到任何到期日 (sym: {{sym}})"}}))
-except Exception as e:
-    print(json.dumps({{"price": 0.0, "ask": 0.0, "error": str(e)}}))
-'''
-        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-        if result.stdout:
-            # 取最後一行輸出 (避免其他警告訊息干擾)
-            lines = [line for line in result.stdout.strip().split('\n') if line.startswith('{')]
-            if lines:
-                data = json.loads(lines[-1])
-                return data["price"], data["ask"], data["error"]
-        return 0.0, 0.0, f"子程序無輸出或錯誤: {result.stderr}"
+        target_dt = datetime.strptime(exp_date_str, "%Y-%m-%d")
+        months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        target_group_name = f"{months[target_dt.month]} {target_dt.day}, {target_dt.year}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+            "Accept": "application/json",
+            "Origin": "https://www.nasdaq.com"
+        }
+        
+        # 依序嘗試 stocks 與 etf
+        for assetclass in ["stocks", "etf"]:
+            url = f"https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={assetclass}&limit=2000"
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200:
+                continue
+                
+            data = res.json()
+            if not data or not data.get("data") or not data["data"].get("table"):
+                continue # Symbol not exists in this class
+            
+            rows = data["data"]["table"].get("rows", [])
+            current_group = ""
+            for row in rows:
+                if row.get("expirygroup"):
+                    current_group = row["expirygroup"]
+                    
+                if current_group == target_group_name:
+                    try:
+                        strike_val = row.get("strike")
+                        if strike_val is None:
+                            continue
+                        row_strike = float(strike_val)
+                        if abs(row_strike - float(strike)) < 0.05:
+                            if opt_type.lower() == "put":
+                                bid = float(row.get("p_Bid") if row.get("p_Bid") not in ["--", None] else 0)
+                                ask = float(row.get("p_Ask") if row.get("p_Ask") not in ["--", None] else 0)
+                                last = float(row.get("p_Last") if row.get("p_Last") not in ["--", None] else 0)
+                            else:
+                                bid = float(row.get("c_Bid") if row.get("c_Bid") not in ["--", None] else 0)
+                                ask = float(row.get("c_Ask") if row.get("c_Ask") not in ["--", None] else 0)
+                                last = float(row.get("c_Last") if row.get("c_Last") not in ["--", None] else 0)
+                            
+                            price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+                            return price, ask, ""
+                    except Exception:
+                        pass
+            
+            return 0.0, 0.0, f"Nasdaq API 找不到履約價 {strike} 或日期 {target_group_name}"
+            
+        return 0.0, 0.0, f"Nasdaq API 找不到標的 {sym}"
     except Exception as e:
-        return 0.0, 0.0, str(e)
+        return 0.0, 0.0, f"Nasdaq API 錯誤: {str(e)}"
+
 
 
 def norm_cdf(x):
