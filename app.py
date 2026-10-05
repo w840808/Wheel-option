@@ -779,7 +779,7 @@ with tab4:
                     premium_rec = float(pos['premium_received'])
                     # 每口 100 股
                     # 計算損益 (預設資料庫存的是每股單價，若當初不小心存成總價會失真)
-                                pnl = (premium_rec - close_price) * 100 * qty
+                    pnl = (premium_rec - close_price) * 100 * qty
                     
                     try:
                         # 1. 紀錄平倉到 trade_history
