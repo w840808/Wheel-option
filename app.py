@@ -8,6 +8,33 @@ import datetime
 from bs4 import BeautifulSoup
 import math
 
+@st.cache_data(ttl=300)
+def fetch_option_prices(sym, strike, exp_date_str, opt_type):
+    try:
+        import yfinance as yf
+        import datetime
+        import pandas as pd
+        ticker = yf.Ticker(sym)
+        available_exps = ticker.options
+        if available_exps:
+            exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+            closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
+            opt = ticker.option_chain(closest_exp)
+            chain = opt.puts if opt_type.lower() == 'put' else opt.calls
+            match = chain[abs(chain['strike'] - strike) < 0.05]
+            if not match.empty:
+                bid = match.iloc[0]['bid']
+                ask = match.iloc[0]['ask']
+                last = match.iloc[0]['lastPrice']
+                current_ask = ask if not pd.isna(ask) and ask > 0 else last
+                current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
+                return current_price, current_ask, ""
+            return 0.0, 0.0, f"找不到履約價 {strike}"
+        return 0.0, 0.0, f"Error: 找不到 {sym} 的到期日 (字串長度: {len(sym)})"
+    except Exception as e:
+        return 0.0, 0.0, str(e)
+
+
 def norm_cdf(x):
     """標準常態分配的累計機率密度函數近似值"""
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
@@ -635,27 +662,8 @@ with tab4:
                     # 抓取即時市價
                     current_price = 0.0
                     current_ask = 0.0
-                    debug_error = ""
-                    try:
-                        ticker = yf.Ticker(sym)
-                        available_exps = ticker.options
-                        if available_exps:
-                            closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
-                            opt = ticker.option_chain(closest_exp)
-                            chain = opt.puts if opt_type == 'put' else opt.calls
-                            match = chain[abs(chain['strike'] - strike) < 0.05]
-                            if not match.empty:
-                                bid = match.iloc[0]['bid']
-                                ask = match.iloc[0]['ask']
-                                last = match.iloc[0]['lastPrice']
-                                current_ask = ask if not pd.isna(ask) and ask > 0 else last
-                                current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
-                            else:
-                                debug_error = f"找不到履約價 {strike}"
-                        else:
-                            debug_error = f"Error: 找不到 {sym} 的到期日 (字串長度: {len(sym)}, 原始: '{row['symbol']}')"
-                    except Exception as e:
-                        debug_error = str(e)
+                    # 使用快取函式來避免 Yahoo Finance Rate Limit
+                    current_price, current_ask, debug_error = fetch_option_prices(sym, strike, exp_date_str, opt_type)
                     
                     # 狀態判定 (保守估計用 Ask 計算停利，避免滑價)
                     status_list = []
