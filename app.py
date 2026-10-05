@@ -14,19 +14,15 @@ def fetch_option_prices(sym, strike, exp_date_str, opt_type):
         import requests
         from datetime import datetime
         
-        target_dt = datetime.strptime(exp_date_str, "%Y-%m-%d")
-        months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        target_group_name = f"{months[target_dt.month]} {target_dt.day}, {target_dt.year}"
-        
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
             "Origin": "https://www.nasdaq.com"
         }
         
-        # 依序嘗試 stocks 與 etf
+        # 依次嘗試 stocks 與 etf
         for assetclass in ["stocks", "etf"]:
-            url = f"https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={assetclass}&limit=2000"
+            url = f"https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={assetclass}&limit=1000&fromdate={exp_date_str}&todate={exp_date_str}"
             res = requests.get(url, headers=headers)
             if res.status_code != 200:
                 continue
@@ -36,33 +32,28 @@ def fetch_option_prices(sym, strike, exp_date_str, opt_type):
                 continue # Symbol not exists in this class
             
             rows = data["data"]["table"].get("rows", [])
-            current_group = ""
             for row in rows:
-                if row.get("expirygroup"):
-                    current_group = row["expirygroup"]
-                    
-                if current_group == target_group_name:
-                    try:
-                        strike_val = row.get("strike")
-                        if strike_val is None:
-                            continue
-                        row_strike = float(strike_val)
-                        if abs(row_strike - float(strike)) < 0.05:
-                            if opt_type.lower() == "put":
-                                bid = float(row.get("p_Bid") if row.get("p_Bid") not in ["--", None] else 0)
-                                ask = float(row.get("p_Ask") if row.get("p_Ask") not in ["--", None] else 0)
-                                last = float(row.get("p_Last") if row.get("p_Last") not in ["--", None] else 0)
-                            else:
-                                bid = float(row.get("c_Bid") if row.get("c_Bid") not in ["--", None] else 0)
-                                ask = float(row.get("c_Ask") if row.get("c_Ask") not in ["--", None] else 0)
-                                last = float(row.get("c_Last") if row.get("c_Last") not in ["--", None] else 0)
-                            
-                            price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
-                            return price, ask, ""
-                    except Exception:
-                        pass
+                try:
+                    strike_val = row.get("strike")
+                    if strike_val is None:
+                        continue
+                    row_strike = float(strike_val)
+                    if abs(row_strike - float(strike)) < 0.05:
+                        if opt_type.lower() == "put":
+                            bid = float(row.get("p_Bid") if row.get("p_Bid") not in ["--", None] else 0)
+                            ask = float(row.get("p_Ask") if row.get("p_Ask") not in ["--", None] else 0)
+                            last = float(row.get("p_Last") if row.get("p_Last") not in ["--", None] else 0)
+                        else:
+                            bid = float(row.get("c_Bid") if row.get("c_Bid") not in ["--", None] else 0)
+                            ask = float(row.get("c_Ask") if row.get("c_Ask") not in ["--", None] else 0)
+                            last = float(row.get("c_Last") if row.get("c_Last") not in ["--", None] else 0)
+                        
+                        price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+                        return price, ask, ""
+                except Exception:
+                    pass
             
-            return 0.0, 0.0, f"Nasdaq API 找不到履約價 {strike} 或日期 {target_group_name}"
+            return 0.0, 0.0, f"Nasdaq API 找不到履約價 {strike} 於日期 {exp_date_str}"
             
         return 0.0, 0.0, f"Nasdaq API 找不到標的 {sym}"
     except Exception as e:
@@ -796,66 +787,67 @@ with tab4:
                         st.markdown(f"*口數: {ao['qty']}*")
             
             st.divider()
-            st.markdown("### 結算平倉 (Close Position)")
+            st.markdown("### 🛠️ 部位管理 (平倉 / 轉倉)")
             close_options = {f"{r['symbol']} {r['expiration_date']} ${r['strike']} {r['option_type']}": r for r in active_data}
+            selected_pos_str = st.selectbox("選擇要操作的活躍部位", list(close_options.keys()))
             
-            with st.form("close_position_form"):
-                selected_pos_str = st.selectbox("選擇要平倉的部位", list(close_options.keys()))
-                close_price = st.number_input("平倉買回權利金 (單口成本，若到期失效歸零請輸入 0)", min_value=0.0, step=0.01, value=0.0)
+            if selected_pos_str:
+                col_close, col_roll = st.columns(2)
+                pos = close_options[selected_pos_str]
+                qty = int(pos['quantity'])
+                premium_rec = float(pos['premium_received'])
                 
-                is_roll = st.checkbox("🔄 這是轉倉 (Roll Out) 操作？ (結算當前部位，同時建立新部位)")
-                st.markdown("---")
-                colA, colB, colC = st.columns(3)
-                new_exp = colA.date_input("新合約到期日 (轉倉才需填寫)", value=datetime.date.today() + datetime.timedelta(days=30))
-                new_strike = colB.number_input("新合約履約價 (轉倉才需填寫)", min_value=0.0, step=1.0)
-                new_premium = colC.number_input("新收取權利金 (每股單價，轉倉才填)", min_value=0.0, step=0.01)
-                
-                submitted_close = st.form_submit_button("確認送出 (平倉/轉倉)")
-                
-                if submitted_close and selected_pos_str:
-                    pos = close_options[selected_pos_str]
-                    qty = int(pos['quantity'])
-                    premium_rec = float(pos['premium_received'])
-                    # 每口 100 股
-                    # 計算損益 (預設資料庫存的是每股單價，若當初不小心存成總價會失真)
-                    pnl = (premium_rec - close_price) * 100 * qty
-                    
-                    try:
-                        # 1. 紀錄平倉到 trade_history
-                        supabase.table("trade_history").insert({
-                            "symbol": pos['symbol'],
-                            "option_type": pos['option_type'],
-                            "strike": pos['strike'],
-                            "expiration_date": pos['expiration_date'],
-                            "open_date": pos['open_date'],
-                            "premium_received": premium_rec,
-                            "premium_paid": close_price,
-                            "quantity": qty,
-                            "pnl": pnl
-                        }).execute()
-                        
-                        # 2. 如果是轉倉，建立新部位
-                        if is_roll and new_strike > 0 and new_premium > 0:
-                            supabase.table("active_options").insert({
-                                "symbol": pos['symbol'],
-                                "option_type": pos['option_type'],
-                                "strike": float(new_strike),
-                                "expiration_date": str(new_exp),
-                                "premium_received": float(new_premium),
-                                "quantity": qty
-                            }).execute()
-                        
-                        # 3. 刪除舊部位
-                        supabase.table("active_options").delete().eq("id", pos['id']).execute()
-                        
-                        if is_roll:
-                            st.success(f"轉倉成功！舊合約平倉損益: ${pnl:.2f}。已為您建立新部位。")
-                        else:
-                            st.success(f"平倉成功！該筆交易總損益為: ${pnl:.2f}")
-                            
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"執行失敗，請確保 trade_history 等資料表存在: {e}")
+                with col_close:
+                    with st.form("close_form"):
+                        st.markdown("#### 🛑 純平倉 (Close)")
+                        st.caption("徹底關閉此交易，計算真實損益並寫入歷史紀錄。")
+                        close_price = st.number_input("買回單價 (若到期歸零請填 0)", min_value=0.0, step=0.01)
+                        sub_close = st.form_submit_button("確認平倉", type="primary")
+                        if sub_close:
+                            pnl = (premium_rec - close_price) * 100 * qty
+                            try:
+                                supabase.table("trade_history").insert({
+                                    "symbol": pos['symbol'],
+                                    "option_type": pos['option_type'],
+                                    "strike": pos['strike'],
+                                    "expiration_date": pos['expiration_date'],
+                                    "open_date": pos['open_date'],
+                                    "premium_received": premium_rec,
+                                    "premium_paid": close_price,
+                                    "quantity": qty,
+                                    "pnl": pnl
+                                }).execute()
+                                supabase.table("active_options").delete().eq("id", pos['id']).execute()
+                                st.success(f"平倉成功！總損益: ${pnl:.2f}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"執行失敗: {e}")
+                                
+                with col_roll:
+                    with st.form("roll_form"):
+                        import datetime
+                        st.markdown("#### 🔄 淨價差轉倉 (Net Credit Roll)")
+                        st.caption("連續記帳法：不產生平倉紀錄，直接將轉倉價差累加至新合約。")
+                        new_exp = st.date_input("新合約到期日", value=datetime.date.today() + datetime.timedelta(days=30))
+                        new_strike = st.number_input("新合約履約價", min_value=0.0, step=1.0)
+                        net_credit = st.number_input("轉倉淨價差 (Net Credit 單價)", min_value=0.0, step=0.01)
+                        sub_roll = st.form_submit_button("確認轉倉", type="primary")
+                        if sub_roll and new_strike > 0:
+                            new_total_premium = premium_rec + net_credit
+                            try:
+                                supabase.table("active_options").insert({
+                                    "symbol": pos['symbol'],
+                                    "option_type": pos['option_type'],
+                                    "strike": float(new_strike),
+                                    "expiration_date": str(new_exp),
+                                    "premium_received": float(new_total_premium),
+                                    "quantity": qty
+                                }).execute()
+                                supabase.table("active_options").delete().eq("id", pos['id']).execute()
+                                st.success(f"轉倉成功！舊權利金 {premium_rec} + 淨價差 {net_credit} = 新總成本 ${new_total_premium:.2f}！")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"執行失敗: {e}")
         else:
             st.info("目前沒有任何活躍部位。")
     except Exception as e:
