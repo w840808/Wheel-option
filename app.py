@@ -11,26 +11,52 @@ import math
 @st.cache_data(ttl=300)
 def fetch_option_prices(sym, strike, exp_date_str, opt_type):
     try:
-        import yfinance as yf
-        import datetime
-        import pandas as pd
-        ticker = yf.Ticker(sym)
-        available_exps = ticker.options
-        if available_exps:
-            exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
-            closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
-            opt = ticker.option_chain(closest_exp)
-            chain = opt.puts if opt_type.lower() == 'put' else opt.calls
-            match = chain[abs(chain['strike'] - strike) < 0.05]
-            if not match.empty:
-                bid = match.iloc[0]['bid']
-                ask = match.iloc[0]['ask']
-                last = match.iloc[0]['lastPrice']
-                current_ask = ask if not pd.isna(ask) and ask > 0 else last
-                current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
-                return current_price, current_ask, ""
-            return 0.0, 0.0, f"找不到履約價 {strike}"
-        return 0.0, 0.0, f"Error: 找不到 {sym} 的到期日 (字串長度: {len(sym)})"
+        import subprocess
+        import json
+        import sys
+        
+        script = f'''
+import yfinance as yf
+import datetime
+import pandas as pd
+import json
+
+try:
+    sym = "{sym}"
+    strike = {strike}
+    exp_date_str = "{exp_date_str}"
+    opt_type = "{opt_type}"
+
+    ticker = yf.Ticker(sym)
+    available_exps = ticker.options
+    if available_exps:
+        exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+        closest_exp = min(available_exps, key=lambda x: abs(datetime.datetime.strptime(x, "%Y-%m-%d").date() - exp_date))
+        opt = ticker.option_chain(closest_exp)
+        chain = opt.puts if opt_type.lower() == 'put' else opt.calls
+        match = chain[abs(chain['strike'] - strike) < 0.05]
+        if not match.empty:
+            bid = match.iloc[0]['bid']
+            ask = match.iloc[0]['ask']
+            last = match.iloc[0]['lastPrice']
+            current_ask = ask if not pd.isna(ask) and ask > 0 else last
+            current_price = (bid + ask) / 2 if (not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0) else last
+            print(json.dumps({{"price": float(current_price), "ask": float(current_ask), "error": ""}}))
+        else:
+            print(json.dumps({{"price": 0.0, "ask": 0.0, "error": f"找不到履約價 {{strike}}"}}))
+    else:
+        print(json.dumps({{"price": 0.0, "ask": 0.0, "error": f"找不到任何到期日 (sym: {{sym}})"}}))
+except Exception as e:
+    print(json.dumps({{"price": 0.0, "ask": 0.0, "error": str(e)}}))
+'''
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        if result.stdout:
+            # 取最後一行輸出 (避免其他警告訊息干擾)
+            lines = [line for line in result.stdout.strip().split('\n') if line.startswith('{')]
+            if lines:
+                data = json.loads(lines[-1])
+                return data["price"], data["ask"], data["error"]
+        return 0.0, 0.0, f"子程序無輸出或錯誤: {result.stderr}"
     except Exception as e:
         return 0.0, 0.0, str(e)
 
