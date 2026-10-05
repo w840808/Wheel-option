@@ -167,15 +167,19 @@ def get_iv_rank(symbol: str) -> float:
 
 def get_next_earnings(symbol: str):
     """從 yfinance 取得下一次財報日"""
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
     try:
-        ticker = yf.Ticker(symbol)
-        calendar = ticker.calendar
-        if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
-            dates = calendar['Earnings Date']
-            today = datetime.date.today()
-            upcoming = [d for d in dates if d >= today]
-            if upcoming:
-                return upcoming[0]
+        # 很多 ETF (如 SOXL, TLT) 沒有財報，yfinance 會在背景狂印 404 Error，我們把它靜音
+        with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+            ticker = yf.Ticker(symbol)
+            calendar = ticker.calendar
+            if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
+                dates = calendar['Earnings Date']
+                today = datetime.date.today()
+                upcoming = [d for d in dates if d >= today]
+                if upcoming:
+                    return upcoming[0]
     except:
         pass
     return None
