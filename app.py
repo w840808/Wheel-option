@@ -852,7 +852,7 @@ with tab5:
             def color_pnl(val):
                 color = 'green' if val > 0 else 'red' if val < 0 else 'white'
                 return f'color: {color}'
-            st.dataframe(df_hist.style.applymap(color_pnl, subset=['單筆損益']), use_container_width=True, hide_index=True)
+            st.dataframe(df_hist.style.map(color_pnl, subset=['單筆損益']) if hasattr(df_hist.style, 'map') else df_hist.style.applymap(color_pnl, subset=['單筆損益']), use_container_width=True, hide_index=True)
             
         else:
             st.info("目前尚無平倉歷史紀錄。")
