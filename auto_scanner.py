@@ -272,6 +272,67 @@ def get_real_call_option(symbol: str, current_price: float, cost_basis: float, m
 # ==========================================
 # 掃描任務主程式
 # ==========================================
+def fetch_option_prices(sym, strike, exp_date_str, opt_type):
+    try:
+        import requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Origin": "https://www.nasdaq.com"
+        }
+        for assetclass in ["stocks", "etf"]:
+            url = f"https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={assetclass}&limit=1000&fromdate={exp_date_str}&todate={exp_date_str}"
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200: continue
+            data = res.json()
+            if not data or not data.get("data") or not data["data"].get("table"): continue
+            rows = data["data"]["table"].get("rows", [])
+            for row in rows:
+                try:
+                    strike_val = row.get("strike")
+                    if strike_val is None: continue
+                    if abs(float(strike_val) - float(strike)) < 0.05:
+                        if opt_type.lower() == "put":
+                            bid = float(row.get("p_Bid") if row.get("p_Bid") not in ["--", None] else 0)
+                            ask = float(row.get("p_Ask") if row.get("p_Ask") not in ["--", None] else 0)
+                            last = float(row.get("p_Last") if row.get("p_Last") not in ["--", None] else 0)
+                        else:
+                            bid = float(row.get("c_Bid") if row.get("c_Bid") not in ["--", None] else 0)
+                            ask = float(row.get("c_Ask") if row.get("c_Ask") not in ["--", None] else 0)
+                            last = float(row.get("c_Last") if row.get("c_Last") not in ["--", None] else 0)
+                        
+                        price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+                        return price, ask, ""
+                except:
+                    pass
+        return 0.0, 0.0, f"NotFound"
+    except Exception as e:
+        return 0.0, 0.0, str(e)
+
+def log_signal_to_db(symbol, signal_type, details):
+    try:
+        supabase.table("signal_logs").insert({
+            "symbol": symbol,
+            "signal_type": signal_type,
+            "details": details
+        }).execute()
+    except Exception as e:
+        print(f"無法寫入 signal_logs: {e}")
+
+def send_telegram_message(text: str):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"發送 Telegram 失敗: {res.text}")
+    except Exception as e:
+        print(f"Telegram API 錯誤: {e}")
+
 def check_active_options():
     print(f"[{datetime.datetime.now()}] 開始檢查活躍選擇權倉位 (Take Profit / Rolling)...")
     try:
@@ -290,44 +351,64 @@ def check_active_options():
             today = datetime.date.today()
             dte = (exp_date - today).days
             
-            # 1. 轉倉提醒 (恰好 21 DTE 時提醒一次)
-            if dte == 21:
-                msg = f"⚠️ <b>轉倉提醒 (21 DTE)</b>\n"
+            # 抓取報價
+            current_price, current_ask, error = fetch_option_prices(symbol, strike, exp_date_str, opt_type)
+            if current_ask == 0:
+                print(f"無法抓取 {symbol} 活躍部位報價: {error}")
+                current_ask = current_price
+            
+            # 狀態檢查
+            if current_ask > 0:
+                profit_pct = ((premium_received - current_ask) / premium_received) * 100
+                
+                # 停利
+                if profit_pct >= 50:
+                    msg = f"🎯 <b>停利通知 (獲利 > 50%)</b>\n"
+                    msg += f"標的: ${symbol}\n"
+                    msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
+                    msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
+                    msg += f"當前獲利: {profit_pct:.1f}%\n"
+                    msg += f"👉 建議: 利潤已達標，建議買回平倉釋放資金效率！\n"
+                    send_telegram_message(msg)
+                    log_signal_to_db(symbol, "TAKE_PROFIT", f"Profit: {profit_pct:.1f}%")
+                    
+                # 停損 / 浮虧
+                elif profit_pct <= -50:
+                    msg = f"📉 <b>嚴重浮虧警告 (虧損 > 50%)</b>\n"
+                    msg += f"標的: ${symbol}\n"
+                    msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
+                    msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
+                    msg += f"當前虧損: {profit_pct:.1f}%\n"
+                    msg += f"👉 建議: 密切注意標的走勢，考慮轉倉 (Roll) 或停損！\n"
+                    send_telegram_message(msg)
+                    log_signal_to_db(symbol, "STOP_LOSS", f"Loss: {profit_pct:.1f}%")
+            
+            # 轉倉檢查 (21 DTE)
+            if 15 <= dte <= 21:
+                msg = f"⚠️ <b>轉倉提醒 (剩餘 {dte} 天)</b>\n"
                 msg += f"標的: ${symbol}\n"
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
-                msg += f"建議: 考慮平倉或向後延期 (Roll Out) 以降低 Gamma 風險！\n"
+                msg += f"👉 建議: 距離到期日過近，Gamma 風險增加，建議提早平倉或延期 (Roll Out)！\n"
+                send_telegram_message(msg)
+                log_signal_to_db(symbol, "ROLL_OUT", f"DTE: {dte}")
+                
+            # 到期檢查
+            elif dte <= 0:
+                msg = f"🚨 <b>合約已到期</b>\n"
+                msg += f"標的: ${symbol}\n"
+                msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
+                msg += f"👉 建議: 請登入券商確認是否被履約或價值歸零，並在系統中完成結算平倉！\n"
                 send_telegram_message(msg)
                 
-            if dte <= 0:
-                continue
-                
-            # 2. 停利檢查 (50% 最大利潤)
-            ticker = yf.Ticker(symbol)
-            try:
-                opt = ticker.option_chain(exp_date_str)
-                chain = opt.puts if opt_type == 'put' else opt.calls
-                match = chain[chain['strike'] == strike]
-                if not match.empty:
-                    current_bid = match.iloc[0]['bid']
-                    current_ask = match.iloc[0]['ask']
-                    # 賣出選擇權平倉是「買回」，看 Ask (如果沒有 Ask 看 lastPrice)
-                    current_price = current_ask if current_ask > 0 else match.iloc[0]['lastPrice']
-                    
-                    if current_price > 0 and current_price <= premium_received * 0.5:
-                        msg = f"🎯 <b>停利通知 (50% 獲利達標)</b>\n"
-                        msg += f"標的: ${symbol}\n"
-                        msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
-                        msg += f"當前平倉成本: ${current_price:.2f} (原收取: ${premium_received:.2f})\n"
-                        msg += f"建議: 利潤已達 50%，建議買回平倉釋放資金效率！\n"
-                        send_telegram_message(msg)
-            except Exception as e:
-                print(f"無法檢查 {symbol} 的合約: {e}")
-                
     except Exception as e:
-        print(f"檢查活躍倉位發生錯誤 (可能尚未建立表格): {e}")
+        print(f"檢查活躍倉位發生錯誤: {e}")
 
 def run_scan():
     print(f"[{datetime.datetime.now()}] 開始執行自動掃描任務...")
+    
+    # 先檢查現有活躍部位
+    check_active_options()
+    
     
     # 預設參數 (可根據需要修改或設計從 DB 讀取)
     SP_RSI_THRESH, SP_IV_THRESH, SP_DELTA = 45, 30.0, 0.15
