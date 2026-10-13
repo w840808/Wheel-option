@@ -309,6 +309,33 @@ def fetch_option_prices(sym, strike, exp_date_str, opt_type):
     except Exception as e:
         return 0.0, 0.0, str(e)
 
+def fetch_stock_price(sym: str) -> float:
+    try:
+        import requests, re
+        headers = {"User-Agent": "Mozilla/5.0", "Origin": "https://www.nasdaq.com"}
+        for ac in ["stocks", "etf"]:
+            url = f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass={ac}"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                resp_json = res.json()
+                if resp_json and resp_json.get("data"):
+                    data = resp_json["data"]
+                    if data and data.get("primaryData"):
+                        lsp = data["primaryData"].get("lastSalePrice", "")
+                        if lsp:
+                            val = float(re.sub(r"[^0-9.]", "", lsp))
+                            if val > 0:
+                                return val
+    except Exception:
+        pass
+    try:
+        p, _ = calculate_rsi(sym)
+        if p and p > 0:
+            return p
+    except Exception:
+        pass
+    return 0.0
+
 def log_signal_to_db(symbol, signal_type, details):
     try:
         supabase.table("signal_logs").insert({
@@ -357,6 +384,10 @@ def check_active_options():
                 print(f"無法抓取 {symbol} 活躍部位報價: {error}")
                 current_ask = current_price
             
+            # 抓取標的現價
+            stock_price = fetch_stock_price(symbol)
+            stock_str = f" (現價 ${stock_price:.2f})" if stock_price > 0 else ""
+            
             # 狀態檢查
             if current_ask > 0:
                 profit_pct = ((premium_received - current_ask) / premium_received) * 100
@@ -364,7 +395,7 @@ def check_active_options():
                 # 停利
                 if profit_pct >= 50:
                     msg = f"🎯 <b>停利通知 (獲利 > 50%)</b>\n"
-                    msg += f"標的: ${symbol}\n"
+                    msg += f"標的: ${symbol}{stock_str}\n"
                     msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                     msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
                     msg += f"當前獲利: {profit_pct:.1f}%\n"
@@ -375,7 +406,7 @@ def check_active_options():
                 # 停損 / 浮虧
                 elif profit_pct <= -50:
                     msg = f"📉 <b>嚴重浮虧警告 (虧損 > 50%)</b>\n"
-                    msg += f"標的: ${symbol}\n"
+                    msg += f"標的: ${symbol}{stock_str}\n"
                     msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                     msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
                     msg += f"當前虧損: {profit_pct:.1f}%\n"
@@ -386,7 +417,7 @@ def check_active_options():
             # 轉倉檢查 (21 DTE)
             if 15 <= dte <= 21:
                 msg = f"⚠️ <b>轉倉提醒 (剩餘 {dte} 天)</b>\n"
-                msg += f"標的: ${symbol}\n"
+                msg += f"標的: ${symbol}{stock_str}\n"
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 距離到期日過近，Gamma 風險增加，建議提早平倉或延期 (Roll Out)！\n"
                 send_telegram_message(msg)
@@ -395,7 +426,7 @@ def check_active_options():
             # 到期檢查
             elif dte <= 0:
                 msg = f"🚨 <b>合約已到期</b>\n"
-                msg += f"標的: ${symbol}\n"
+                msg += f"標的: ${symbol}{stock_str}\n"
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 請登入券商確認是否被履約或價值歸零，並在系統中完成結算平倉！\n"
                 send_telegram_message(msg)

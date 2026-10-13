@@ -59,6 +59,42 @@ def fetch_option_prices(sym, strike, exp_date_str, opt_type):
     except Exception as e:
         return 0.0, 0.0, f"Nasdaq API 錯誤: {str(e)}"
 
+@st.cache_data(ttl=120)
+def fetch_stock_price(sym: str) -> float:
+    """取得標的正股最新市價 (優先使用 Nasdaq 即時 API，若失敗則使用 calculate_rsi/yfinance)"""
+    try:
+        import requests
+        import re
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Origin": "https://www.nasdaq.com"
+        }
+        for assetclass in ["stocks", "etf"]:
+            url = f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass={assetclass}"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                resp_json = res.json()
+                if resp_json and resp_json.get("data"):
+                    data = resp_json["data"]
+                    if data and data.get("primaryData"):
+                        lsp = data["primaryData"].get("lastSalePrice", "")
+                        if lsp:
+                            val = float(re.sub(r"[^0-9.]", "", lsp))
+                            if val > 0:
+                                return val
+    except Exception:
+        pass
+        
+    try:
+        p, _ = calculate_rsi(sym)
+        if p and p > 0:
+            return p
+    except Exception:
+        pass
+        
+    return 0.0
+
 
 
 def norm_cdf(x):
@@ -724,6 +760,7 @@ with tab4:
                     current_ask = 0.0
                     # 使用快取函式來避免 Yahoo Finance Rate Limit
                     current_price, current_ask, debug_error = fetch_option_prices(sym, strike, exp_date_str, opt_type)
+                    stock_price = fetch_stock_price(sym)
                     
                     # 狀態判定 (保守估計用 Ask 計算停利，避免滑價)
                     status_list = []
@@ -746,6 +783,7 @@ with tab4:
                     display_ao.append({
                         "ID": row['id'],
                         "symbol": sym,
+                        "stock_price": stock_price if stock_price > 0 else None,
                         "type": row['option_type'],
                         "strike": strike,
                         "exp": exp_date_str,
@@ -771,6 +809,7 @@ with tab4:
                     "ID": None,
                     "debug_error": None,
                     "symbol": "標的",
+                    "stock_price": st.column_config.NumberColumn("現價", format="$%.2f", help="標的正股最新市價"),
                     "type": "類型",
                     "strike": st.column_config.NumberColumn("履約價", format="$%.1f"),
                     "exp": "到期日",
@@ -782,7 +821,7 @@ with tab4:
                     "qty": "口數",
                     "status": "目前狀態"
                 },
-                disabled=["symbol", "type", "strike", "exp", "dte", "current_price", "current_ask", "profit_pct", "qty", "status"]
+                disabled=["symbol", "stock_price", "type", "strike", "exp", "dte", "current_price", "current_ask", "profit_pct", "qty", "status"]
             )
             
             # 偵測是否被修改
