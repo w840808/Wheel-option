@@ -799,7 +799,7 @@ with tab4:
             
             import pandas as pd
             df_ao = pd.DataFrame(display_ao)
-            st.caption("提示：您可以直接在表格中點擊『建倉權利金』的數字進行修改，修改後按下 Enter 即可自動存檔！")
+            st.caption("提示：您可以直接在表格中點擊『總權利金』的數字進行修改，修改後按下 Enter 即可自動存檔！")
             
             edited_ao = st.data_editor(
                 df_ao,
@@ -814,10 +814,10 @@ with tab4:
                     "strike": st.column_config.NumberColumn("履約價", format="$%.1f"),
                     "exp": "到期日",
                     "dte": "DTE(天)",
-                    "premium": st.column_config.NumberColumn("建倉權利金(✏️可改)", format="$%.2f"),
-                    "current_price": st.column_config.NumberColumn("中價(Mid)", format="$%.2f"),
-                    "current_ask": st.column_config.NumberColumn("賣價(Ask)", format="$%.2f"),
-                    "profit_pct": st.column_config.NumberColumn("獲利(%)", format="%.1f%%"),
+                    "premium": st.column_config.NumberColumn("總權利金(✏️可改)", format="$%.2f", help="累計淨收取權利金。若曾轉倉，此為『原權利金 ＋ 轉倉淨價差』"),
+                    "current_price": st.column_config.NumberColumn("中價(Mid)", format="$%.2f", help="新合約目前市場中間價"),
+                    "current_ask": st.column_config.NumberColumn("賣價(Ask)", format="$%.2f", help="目前平倉買回需支付之賣價"),
+                    "profit_pct": st.column_config.NumberColumn("獲利(%)", format="%.1f%%", help="計算方式：((總權利金 - 賣價Ask) / 總權利金) * 100%"),
                     "qty": "口數",
                     "status": "目前狀態"
                 },
@@ -873,13 +873,13 @@ with tab4:
                     with st.form("roll_form"):
                         import datetime
                         st.markdown("#### 🔄 淨價差轉倉 (Net Credit Roll)")
-                        st.caption("連續記帳法：不產生平倉紀錄，直接將轉倉價差累加至新合約。")
+                        st.caption("連續記帳法：不產生平倉紀錄，直接將轉倉價差累加至新合約（新總權利金 = 舊權利金 + 淨價差）。")
                         new_exp = st.date_input("新合約到期日", value=datetime.date.today() + datetime.timedelta(days=30))
                         new_strike = st.number_input("新合約履約價", min_value=0.0, step=1.0)
-                        net_credit = st.number_input("轉倉淨價差 (Net Credit 單價)", min_value=0.0, step=0.01)
+                        net_credit = st.number_input("轉倉淨價差 (Net Credit 單價，正數為淨收，負數為淨付)", step=0.01)
                         sub_roll = st.form_submit_button("確認轉倉", type="primary")
                         if sub_roll and new_strike > 0:
-                            new_total_premium = premium_rec + net_credit
+                            new_total_premium = round(premium_rec + net_credit, 2)
                             try:
                                 supabase.table("active_options").insert({
                                     "symbol": pos['symbol'],
@@ -890,7 +890,7 @@ with tab4:
                                     "quantity": qty
                                 }).execute()
                                 supabase.table("active_options").delete().eq("id", pos['id']).execute()
-                                st.success(f"轉倉成功！舊權利金 {premium_rec} + 淨價差 {net_credit} = 新總成本 ${new_total_premium:.2f}！")
+                                st.success(f"轉倉成功！舊權利金 ${premium_rec:.2f} + 淨價差 ${net_credit:.2f} = 累計總權利金 ${new_total_premium:.2f}！")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"執行失敗: {e}")
