@@ -1,4 +1,20 @@
 import streamlit as st
+import sys
+import logging
+import warnings
+
+# 忽略不必要的警告，防止 Pandas 等套件引發例外
+warnings.filterwarnings("ignore")
+
+# 將 yfinance 的 logger 設為 CRITICAL，徹底靜音 ETF 無財報的 404 等非致命訊息
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+# 防禦機制：確保 sys.stderr 與 sys.stdout 保持可用，避免在多執行緒或例外時變成已關閉的串流
+if sys.stderr is None or getattr(sys.stderr, "closed", False):
+    sys.stderr = sys.__stderr__ or sys.stdout
+if sys.stdout is None or getattr(sys.stdout, "closed", False):
+    sys.stdout = sys.__stdout__ or sys.stderr
+
 from supabase import create_client, Client
 import yfinance as yf
 import pandas as pd
@@ -203,20 +219,16 @@ def get_iv_rank(symbol: str) -> float:
 
 def get_next_earnings(symbol: str):
     """從 yfinance 取得下一次財報日"""
-    import io
-    from contextlib import redirect_stdout, redirect_stderr
     try:
-        # 很多 ETF (如 SOXL, TLT) 沒有財報，yfinance 會在背景狂印 404 Error，我們把它靜音
-        with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
-            ticker = yf.Ticker(symbol)
-            calendar = ticker.calendar
-            if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
-                dates = calendar['Earnings Date']
-                today = datetime.date.today()
-                upcoming = [d for d in dates if d >= today]
-                if upcoming:
-                    return upcoming[0]
-    except:
+        ticker = yf.Ticker(symbol)
+        calendar = ticker.calendar
+        if calendar and 'Earnings Date' in calendar and calendar['Earnings Date']:
+            dates = calendar['Earnings Date']
+            today = datetime.date.today()
+            upcoming = [d for d in dates if d >= today]
+            if upcoming:
+                return upcoming[0]
+    except Exception:
         pass
     return None
 
@@ -692,7 +704,7 @@ with tab3:
             'signal_type': '策略',
             'details': '詳細資訊'
         }
-        df_logs.rename(columns={k:v for k,v in rename_dict.items() if k in df_logs.columns}, inplace=True)
+        df_logs = df_logs.rename(columns={k:v for k,v in rename_dict.items() if k in df_logs.columns})
         
         if '時間' in df_logs.columns:
             # 轉換為台灣時區並格式化

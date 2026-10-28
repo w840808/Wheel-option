@@ -5,9 +5,15 @@ import requests
 import pandas as pd
 import yfinance as yf
 import math
+import logging
+import warnings
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from dotenv import load_dotenv
+
+# 忽略警告並靜音 yfinance 日誌
+warnings.filterwarnings("ignore")
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # 載入環境變數 (可以在本地建立一個 .env 檔案來存放)
 load_dotenv()
