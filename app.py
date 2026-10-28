@@ -415,21 +415,24 @@ def send_telegram_message(message: str):
     except Exception as e:
         st.error(f"Telegram 設定錯誤或連線失敗: {e}")
 
-def log_signal_to_db(symbol: str, signal_type: str, details: str):
-    """將觸發的訊號寫入 Supabase 日誌表格"""
+def log_trade_action(symbol: str, action_type: str, details: str):
+    """將交易動作 (開倉/平倉/轉倉/修改等) 與系統訊號完整寫入 Supabase 日誌表格"""
     try:
         supabase.table("signal_logs").insert({
-            "symbol": symbol,
-            "signal_type": signal_type,
+            "symbol": symbol.strip().upper(),
+            "signal_type": action_type,
             "details": details
         }).execute()
     except Exception as e:
-        st.error(f"寫入日誌失敗: {e}")
+        print(f"寫入交易日誌失敗: {e}")
+
+# 相容舊有函式呼叫
+log_signal_to_db = log_trade_action
 
 # ==========================================
 # 3. 頁面與 UI 介面設計
 # ==========================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 觀察清單 (Sell Put)", "💼 現貨庫存 (Covered Call)", "🚀 訊號推播與日誌", "🎯 活躍部位 (Active Options)", "📊 歷史損益 (Trade History)"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 觀察清單 (Sell Put)", "💼 現貨庫存 (Covered Call)", "🚀 訊號推播與日誌", "🎯 活躍部位 (Active Options)", "📊 歷史損益與交易日誌 (Trade History & Logs)"])
 
 # ----------------- Tab 1: Watchlist -----------------
 with tab1:
@@ -743,7 +746,14 @@ with tab4:
                     "premium_received": float(ao_premium),
                     "quantity": int(ao_qty)
                 }).execute()
-                st.success(f"已新增 {ao_symbol} {ao_type} 部位")
+                stock_curr = fetch_stock_price(ao_symbol)
+                stock_info = f" | 正股現價: ${stock_curr:.2f}" if stock_curr > 0 else ""
+                log_trade_action(
+                    ao_symbol,
+                    "🟢 開倉",
+                    f"賣出開倉 {ao_type} | 履約價: ${float(ao_strike):.1f} | 到期日: {ao_exp} | 建倉權利金: ${float(ao_premium):.2f} | 口數: {int(ao_qty)}{stock_info}"
+                )
+                st.success(f"已新增 {ao_symbol} {ao_type} 部位並記錄於交易日誌！")
                 st.rerun()
             except Exception as e:
                 st.error(f"寫入資料庫失敗: {e}")
@@ -841,7 +851,12 @@ with tab4:
                 orig_row = df_ao.iloc[idx]
                 if row['premium'] != orig_row['premium']:
                     supabase.table("active_options").update({"premium_received": row['premium']}).eq("id", row['ID']).execute()
-                    st.success(f"已將 {row['symbol']} 的權利金更新為 ${row['premium']}！")
+                    log_trade_action(
+                        row['symbol'],
+                        "✏️ 調整權利金",
+                        f"手動調整 {row['type']} ${row['strike']:.1f} (到期 {row['exp']}) 建倉權利金: ${orig_row['premium']:.2f} ➔ ${row['premium']:.2f}"
+                    )
+                    st.success(f"已將 {row['symbol']} 的權利金更新為 ${row['premium']} 並記錄於日誌！")
                     st.rerun()
             
             st.divider()
@@ -858,7 +873,7 @@ with tab4:
                 with col_close:
                     with st.form("close_form"):
                         st.markdown("#### 🛑 純平倉 (Close)")
-                        st.caption("徹底關閉此交易，計算真實損益並寫入歷史紀錄。")
+                        st.caption("徹底關閉此交易，計算真實損益並寫入歷史紀錄與交易日誌。")
                         close_price = st.number_input("買回單價 (若到期歸零請填 0)", min_value=0.0, step=0.01)
                         sub_close = st.form_submit_button("確認平倉", type="primary")
                         if sub_close:
@@ -876,7 +891,13 @@ with tab4:
                                     "pnl": pnl
                                 }).execute()
                                 supabase.table("active_options").delete().eq("id", pos['id']).execute()
-                                st.success(f"平倉成功！總損益: ${pnl:.2f}")
+                                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                                log_trade_action(
+                                    pos['symbol'],
+                                    "🛑 平倉",
+                                    f"買回平倉 {pos['option_type']} | 履約價: ${pos['strike']:.1f} | 到期日: {pos['expiration_date']} | 建倉收: ${premium_rec:.2f} | 買回付: ${close_price:.2f} | 口數: {qty} | 實現損益: {pnl_str}"
+                                )
+                                st.success(f"平倉成功！總損益: ${pnl:.2f} (已寫入歷史紀錄與交易日誌)")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"執行失敗: {e}")
@@ -926,8 +947,14 @@ with tab4:
                                 # 3. 刪除 active_options 中的舊部位
                                 supabase.table("active_options").delete().eq("id", pos['id']).execute()
                                 
-                                net_msg = f"淨收 (Net Credit) ${net_credit:.2f}" if net_credit >= 0 else f"淨付 (Net Debit) ${abs(net_credit):.2f}"
-                                st.success(f"🎉 轉倉成功！\n- 舊合約已結算，損益: ${old_pnl:.2f} (已存入歷史紀錄)\n- 新合約已建立: ${new_strike} {pos['option_type']} (建倉價: ${new_open_premium:.2f})\n- 本次轉倉淨價差: {net_msg}")
+                                old_pnl_str = f"+${old_pnl:.2f}" if old_pnl >= 0 else f"-${abs(old_pnl):.2f}"
+                                net_msg = f"淨收 +${net_credit:.2f}" if net_credit >= 0 else f"淨付 -${abs(net_credit):.2f}"
+                                log_trade_action(
+                                    pos['symbol'],
+                                    "🔄 轉倉",
+                                    f"舊約: ${pos['strike']:.1f} {pos['option_type']} (平倉買回 ${old_close_price:.2f}, 損益 {old_pnl_str}) ➔ 新約: ${float(new_strike):.1f} {pos['option_type']} (到期 {new_exp}, 賣出建倉 ${float(new_open_premium):.2f}) | 淨價差: {net_msg}"
+                                )
+                                st.success(f"🎉 轉倉成功！\n- 舊合約已結算，損益: ${old_pnl:.2f} (已存入歷史紀錄與交易日誌)\n- 新合約已建立: ${new_strike} {pos['option_type']} (建倉價: ${new_open_premium:.2f})\n- 本次轉倉淨價差: {net_msg}")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"執行失敗: {e}")
@@ -936,9 +963,9 @@ with tab4:
     except Exception as e:
         st.error(f"讀取活躍部位失敗: {e}")
 
-# ----------------- Tab 5: Trade History -----------------
+# ----------------- Tab 5: Trade History & Lifecycle Logs -----------------
 with tab5:
-    st.subheader("📊 歷史損益與交易紀錄 (Trade History)")
+    st.subheader("📊 歷史損益與交易日誌 (Trade History & Lifecycle Logs)")
     try:
         history_data = supabase.table("trade_history").select("*").order("close_date", desc=True).execute().data
         if history_data:
@@ -961,8 +988,17 @@ with tab5:
                     "單筆損益": pnl
                 })
                 
-            st.metric("累積已實現損益 (Total Realized P&L)", f"${total_pnl:.2f}")
-            st.caption("提示：您可以直接在表格中點擊『建倉權利金』或『平倉權利金』進行修改，系統會自動重新計算單筆損益！")
+            # 統計指標看板
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("累積已實現損益", f"${total_pnl:.2f}")
+            col_m2.metric("已平倉筆數", f"{len(history_data)} 筆")
+            win_trades = [r for r in history_data if float(r['pnl']) > 0]
+            win_rate = (len(win_trades) / len(history_data) * 100) if history_data else 0.0
+            col_m3.metric("勝率 (Win Rate)", f"{win_rate:.1f}%")
+            avg_pnl = (total_pnl / len(history_data)) if history_data else 0.0
+            col_m4.metric("平均單筆損益", f"${avg_pnl:.2f}")
+            
+            st.caption("提示：您可以直接在表格中點擊『建倉權利金』或『平倉權利金』進行修改，系統會自動重新計算單筆損益並記錄於日誌！")
             
             df_hist = pd.DataFrame(display_hist)
             
@@ -988,12 +1024,91 @@ with tab5:
                         "premium_paid": row['平倉權利金'],
                         "pnl": new_pnl
                     }).eq("id", row['ID']).execute()
-                    st.success("歷史紀錄已成功更新！")
+                    log_trade_action(
+                        row['標的'],
+                        "✏️ 調整歷史",
+                        f"修正歷史平倉紀錄 ID {row['ID']} ({row['標的']} ${row['履約價']:.1f}) | 建倉: ${row['建倉權利金']:.2f} | 平倉: ${row['平倉權利金']:.2f} | 修正後損益: ${new_pnl:.2f}"
+                    )
+                    st.success("歷史紀錄已成功更新並記錄於交易日誌！")
                     st.rerun()
             
         else:
             st.info("目前尚無平倉歷史紀錄。")
     except Exception as e:
         st.error(f"讀取歷史紀錄失敗 (請確認 trade_history 資料表是否已建立): {e}")
+
+    st.divider()
+    st.subheader("📜 完整交易歷程與日誌 (Trade Action & Lifecycle Logs)")
+    st.caption("完整記錄您的每一筆開倉、轉倉、平倉、權利金調整與監控提醒，支援依『標的』篩選查看單一標的的完整生命週期，方便覆盤與決策判斷！")
+    
+    try:
+        all_logs = supabase.table("signal_logs").select("*").order("created_at", desc=True).limit(300).execute().data
+        if all_logs:
+            # 取得所有出現過的標的清單
+            all_symbols = sorted(list(set([r['symbol'].strip().upper() for r in all_logs if r.get('symbol')])))
+            
+            col_flt1, col_flt2, col_flt3 = st.columns([1.5, 1.5, 1])
+            sel_symbol = col_flt1.selectbox("🔍 依標的篩選歷程", ["全部標的"] + all_symbols, key="trade_log_sym_filter")
+            sel_type = col_flt2.selectbox("🏷️ 依事件類型篩選", ["全部紀錄", "實盤交易操作 (開倉/轉倉/平倉/調整)", "系統推播與監控訊號"], key="trade_log_type_filter")
+            max_rows = col_flt3.selectbox("顯示筆數", [50, 100, 200, "全部"], index=0, key="trade_log_limit")
+            
+            # 篩選資料
+            filtered_logs = all_logs
+            if sel_symbol != "全部標的":
+                filtered_logs = [r for r in filtered_logs if r.get('symbol', '').strip().upper() == sel_symbol]
+                
+            if sel_type == "實盤交易操作 (開倉/轉倉/平倉/調整)":
+                filtered_logs = [r for r in filtered_logs if any(k in r.get('signal_type', '') for k in ["開倉", "轉倉", "平倉", "調整", "TRADE", "CLOSE", "ROLL", "OPEN"])]
+            elif sel_type == "系統推播與監控訊號":
+                filtered_logs = [r for r in filtered_logs if not any(k in r.get('signal_type', '') for k in ["開倉", "轉倉", "平倉", "調整", "TRADE", "CLOSE", "ROLL", "OPEN"])]
+                
+            if max_rows != "全部":
+                filtered_logs = filtered_logs[:int(max_rows)]
+                
+            # 若選取了特定標的，顯示視覺化時間軸脈絡卡片
+            if sel_symbol != "全部標的" and filtered_logs:
+                st.markdown(f"#### ⏱️ **{sel_symbol}** 交易脈絡時間軸")
+                chrono_logs = sorted(filtered_logs, key=lambda x: x['created_at'])
+                for item in chrono_logs:
+                    local_time = pd.to_datetime(item['created_at']).tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')
+                    sig = item.get('signal_type', '')
+                    detail = item.get('details', '')
+                    
+                    if "開倉" in sig:
+                        icon = "🟢"
+                    elif "轉倉" in sig:
+                        icon = "🔄"
+                    elif "平倉" in sig:
+                        icon = "🛑"
+                    elif "調整" in sig:
+                        icon = "✏️"
+                    elif "停利" in sig or "TAKE_PROFIT" in sig:
+                        icon = "🎯"
+                    elif "轉倉" in sig or "ROLL_OUT" in sig:
+                        icon = "⚠️"
+                    else:
+                        icon = "ℹ️"
+                        
+                    st.info(f"**{icon} {local_time} | {sig}**\n\n{detail}")
+                    
+            # 格式化表格展示
+            if filtered_logs:
+                df_log_display = pd.DataFrame(filtered_logs)
+                cols_keep = ['created_at', 'symbol', 'signal_type', 'details']
+                df_log_display = df_log_display[[c for c in cols_keep if c in df_log_display.columns]]
+                df_log_display['created_at'] = pd.to_datetime(df_log_display['created_at']).dt.tz_convert('Asia/Taipei').dt.strftime('%Y-%m-%d %H:%M:%S')
+                df_log_display = df_log_display.rename(columns={
+                    'created_at': '時間 (台灣)',
+                    'symbol': '標的',
+                    'signal_type': '動作 / 類別',
+                    'details': '詳細資訊'
+                })
+                st.dataframe(df_log_display, use_container_width=True, hide_index=True)
+            else:
+                st.write("沒有符合篩選條件的交易日誌紀錄。")
+        else:
+            st.info("目前尚無任何交易或訊號日誌。")
+    except Exception as e:
+        st.error(f"讀取交易日誌失敗: {e}")
 
 

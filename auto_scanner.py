@@ -407,7 +407,7 @@ def check_active_options():
                     msg += f"當前獲利: {profit_pct:.1f}%\n"
                     msg += f"👉 建議: 利潤已達標，建議買回平倉釋放資金效率！\n"
                     send_telegram_message(msg)
-                    log_signal_to_db(symbol, "TAKE_PROFIT", f"Profit: {profit_pct:.1f}%")
+                    log_signal_to_db(symbol, "🎯 停利提醒", f"獲利達標 {profit_pct:.1f}% | 合約: {exp_date_str} ${strike} {opt_type.capitalize()} | 成本 ${current_ask:.2f} (原收 ${premium_received:.2f})")
                     
                 # 停損 / 浮虧
                 elif profit_pct <= -50:
@@ -418,7 +418,7 @@ def check_active_options():
                     msg += f"當前虧損: {profit_pct:.1f}%\n"
                     msg += f"👉 建議: 密切注意標的走勢，考慮轉倉 (Roll) 或停損！\n"
                     send_telegram_message(msg)
-                    log_signal_to_db(symbol, "STOP_LOSS", f"Loss: {profit_pct:.1f}%")
+                    log_signal_to_db(symbol, "📉 浮虧警告", f"浮虧超標 {profit_pct:.1f}% | 合約: {exp_date_str} ${strike} {opt_type.capitalize()} | 成本 ${current_ask:.2f} (原收 ${premium_received:.2f})")
             
             # 轉倉檢查 (21 DTE)
             if 15 <= dte <= 21:
@@ -427,7 +427,7 @@ def check_active_options():
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 距離到期日過近，Gamma 風險增加，建議提早平倉或延期 (Roll Out)！\n"
                 send_telegram_message(msg)
-                log_signal_to_db(symbol, "ROLL_OUT", f"DTE: {dte}")
+                log_signal_to_db(symbol, "⚠️ 轉倉提醒", f"剩餘 {dte} 天 (DTE≤21) | 合約: {exp_date_str} ${strike} {opt_type.capitalize()}")
                 
             # 到期檢查
             elif dte <= 0:
@@ -436,6 +436,7 @@ def check_active_options():
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 請登入券商確認是否被履約或價值歸零，並在系統中完成結算平倉！\n"
                 send_telegram_message(msg)
+                log_signal_to_db(symbol, "🚨 到期提醒", f"合約今日到期 (DTE: {dte}) | 合約: {exp_date_str} ${strike} {opt_type.capitalize()}")
                 
     except Exception as e:
         print(f"檢查活躍倉位發生錯誤: {e}")
