@@ -811,7 +811,7 @@ with tab4:
             
             import pandas as pd
             df_ao = pd.DataFrame(display_ao)
-            st.caption("提示：您可以直接在表格中點擊『總權利金』的數字進行修改，修改後按下 Enter 即可自動存檔！")
+            st.caption("提示：您可以直接在表格中點擊『建倉權利金』的數字進行修改，修改後按下 Enter 即可自動存檔！")
             
             edited_ao = st.data_editor(
                 df_ao,
@@ -826,10 +826,10 @@ with tab4:
                     "strike": st.column_config.NumberColumn("履約價", format="$%.1f"),
                     "exp": "到期日",
                     "dte": "DTE(天)",
-                    "premium": st.column_config.NumberColumn("總權利金(✏️可改)", format="$%.2f", help="累計淨收取權利金。若曾轉倉，此為『原權利金 ＋ 轉倉淨價差』"),
+                    "premium": st.column_config.NumberColumn("建倉權利金(✏️可改)", format="$%.2f", help="新合約開倉每股權利金。獲利率依此計算：((建倉權利金 - 賣價Ask) / 建倉權利金) * 100%"),
                     "current_price": st.column_config.NumberColumn("中價(Mid)", format="$%.2f", help="新合約目前市場中間價"),
                     "current_ask": st.column_config.NumberColumn("賣價(Ask)", format="$%.2f", help="目前平倉買回需支付之賣價"),
-                    "profit_pct": st.column_config.NumberColumn("獲利(%)", format="%.1f%%", help="計算方式：((總權利金 - 賣價Ask) / 總權利金) * 100%"),
+                    "profit_pct": st.column_config.NumberColumn("獲利(%)", format="%.1f%%", help="計算方式：((建倉權利金 - 賣價Ask) / 建倉權利金) * 100%"),
                     "qty": "口數",
                     "status": "目前狀態"
                 },
@@ -884,25 +884,50 @@ with tab4:
                 with col_roll:
                     with st.form("roll_form"):
                         import datetime
-                        st.markdown("#### 🔄 淨價差轉倉 (Net Credit Roll)")
-                        st.caption("連續記帳法：不產生平倉紀錄，直接將轉倉價差累加至新合約（新總權利金 = 舊權利金 + 淨價差）。")
-                        new_exp = st.date_input("新合約到期日", value=datetime.date.today() + datetime.timedelta(days=30))
-                        new_strike = st.number_input("新合約履約價", min_value=0.0, step=1.0)
-                        net_credit = st.number_input("轉倉淨價差 (Net Credit 單價，正數為淨收，負數為淨付)", step=0.01)
+                        st.markdown("#### 🔄 轉倉操作 (Roll Out)")
+                        st.caption("正統券商結算法：結算舊合約損益入歷史紀錄，並以新合約賣出價建立新部位，精確計算獲利率與停利。")
+                        
+                        col_r1, col_r2 = st.columns(2)
+                        new_exp = col_r1.date_input("新合約到期日", value=datetime.date.today() + datetime.timedelta(days=30))
+                        new_strike = col_r2.number_input("新合約履約價", min_value=0.0, step=1.0)
+                        
+                        col_r3, col_r4 = st.columns(2)
+                        old_close_price = col_r3.number_input(f"舊合約買回價 (BTC, 原收 ${premium_rec:.2f})", min_value=0.0, step=0.01)
+                        new_open_premium = col_r4.number_input("新合約賣出價 (STO 每股權利金)", min_value=0.0, step=0.01)
+                        
                         sub_roll = st.form_submit_button("確認轉倉", type="primary")
-                        if sub_roll and new_strike > 0:
-                            new_total_premium = round(premium_rec + net_credit, 2)
+                        if sub_roll and new_strike > 0 and new_open_premium > 0:
+                            old_pnl = (premium_rec - old_close_price) * 100 * qty
+                            net_credit = round(new_open_premium - old_close_price, 2)
                             try:
+                                # 1. 舊合約平倉結算，寫入 trade_history
+                                supabase.table("trade_history").insert({
+                                    "symbol": pos['symbol'],
+                                    "option_type": pos['option_type'],
+                                    "strike": pos['strike'],
+                                    "expiration_date": pos['expiration_date'],
+                                    "open_date": pos['open_date'],
+                                    "premium_received": premium_rec,
+                                    "premium_paid": old_close_price,
+                                    "quantity": qty,
+                                    "pnl": old_pnl
+                                }).execute()
+                                
+                                # 2. 新合約建立，以真實新賣出權利金計入 active_options
                                 supabase.table("active_options").insert({
                                     "symbol": pos['symbol'],
                                     "option_type": pos['option_type'],
                                     "strike": float(new_strike),
                                     "expiration_date": str(new_exp),
-                                    "premium_received": float(new_total_premium),
+                                    "premium_received": float(new_open_premium),
                                     "quantity": qty
                                 }).execute()
+                                
+                                # 3. 刪除 active_options 中的舊部位
                                 supabase.table("active_options").delete().eq("id", pos['id']).execute()
-                                st.success(f"轉倉成功！舊權利金 ${premium_rec:.2f} + 淨價差 ${net_credit:.2f} = 累計總權利金 ${new_total_premium:.2f}！")
+                                
+                                net_msg = f"淨收 (Net Credit) ${net_credit:.2f}" if net_credit >= 0 else f"淨付 (Net Debit) ${abs(net_credit):.2f}"
+                                st.success(f"🎉 轉倉成功！\n- 舊合約已結算，損益: ${old_pnl:.2f} (已存入歷史紀錄)\n- 新合約已建立: ${new_strike} {pos['option_type']} (建倉價: ${new_open_premium:.2f})\n- 本次轉倉淨價差: {net_msg}")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"執行失敗: {e}")
