@@ -2,11 +2,19 @@ name: Wheel Strategy Auto Scanner
 
 on:
   schedule:
-    # 每天 UTC 時間 14:00 執行 (大約是美東開盤時間 10:00 AM)
-    # 您可以依據需要修改 (格式: 分 時 日 月 星期)
-    - cron: '0 14 * * 1-5'
+    # 避開整點佇列塞車，設定於美股開盤前半場執行 (台灣時間 21:45 與 23:15)
+    # 1. 台灣時間 21:45 (UTC 13:45) - 夏令開盤後 15 分鐘
+    - cron: '45 13 * * 1-5'
+    # 2. 台灣時間 23:15 (UTC 15:15) - 睡前盤中最後掃描
+    - cron: '15 15 * * 1-5'
   # 允許手動從 GitHub 介面觸發測試
   workflow_dispatch:
+    inputs:
+      force_notify:
+        description: '強制發送 Telegram 推播 (略過時段檢查)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   scan:
@@ -32,5 +40,6 @@ jobs:
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
+        FORCE_NOTIFY: ${{ inputs.force_notify }}
       run: |
         python auto_scanner.py

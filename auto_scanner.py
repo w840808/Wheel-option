@@ -9,22 +9,38 @@ import logging
 import warnings
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # 忽略警告並靜音 yfinance 日誌
 warnings.filterwarnings("ignore")
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-
-# 載入環境變數 (可以在本地建立一個 .env 檔案來存放)
-load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# 若環境變數為空，嘗試從 .streamlit/secrets.toml 備援載入
 if not all([SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, CHAT_ID]):
-    print("❌ 缺少環境變數，請檢查 .env 檔案設定。")
+    try:
+        import toml
+        secrets_path = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
+        if os.path.exists(secrets_path):
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                sec = toml.load(f)
+                SUPABASE_URL = SUPABASE_URL or sec.get("SUPABASE_URL")
+                SUPABASE_KEY = SUPABASE_KEY or sec.get("SUPABASE_KEY")
+                TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN or sec.get("TELEGRAM_BOT_TOKEN")
+                CHAT_ID = CHAT_ID or sec.get("CHAT_ID")
+    except Exception:
+        pass
+
+if not all([SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, CHAT_ID]):
+    print("❌ 缺少環境變數，請檢查 .env 或 secrets.toml 設定。")
     exit(1)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -352,7 +368,35 @@ def log_signal_to_db(symbol, signal_type, details):
     except Exception as e:
         print(f"無法寫入 signal_logs: {e}")
 
+def is_notification_allowed() -> bool:
+    """檢查當前台灣時間是否在允許推播時段內 (台灣時間 21:30 ~ 23:45)
+    避開半夜與清晨收盤時段 (00:00 ~ 21:30)，避免半夜打擾使用者睡眠。
+    """
+    if os.getenv("FORCE_NOTIFY", "").lower() in ["true", "1"]:
+        return True
+        
+    tw_tz = datetime.timezone(datetime.timedelta(hours=8))
+    tw_now = datetime.datetime.now(tw_tz)
+    
+    # 僅在週一到週五的美股交易日推播
+    if tw_now.weekday() > 4:
+        return False
+        
+    current_minutes = tw_now.hour * 60 + tw_now.minute
+    start_minutes = 21 * 60 + 30   # 21:30
+    end_minutes = 23 * 60 + 45     # 23:45
+    
+    return start_minutes <= current_minutes <= end_minutes
+
 def send_telegram_message(text: str):
+    tw_tz = datetime.timezone(datetime.timedelta(hours=8))
+    tw_now_str = datetime.datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 時間守衛：若非允許時段，自動攔截靜音
+    if not is_notification_allowed():
+        print(f"[{tw_now_str}] [SILENT] 當前為靜音時段 (僅允許台灣時間 21:30 ~ 23:45 推播)，已略過 Telegram 發送以避免半夜打擾。")
+        return
+        
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
@@ -363,6 +407,8 @@ def send_telegram_message(text: str):
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code != 200:
             print(f"發送 Telegram 失敗: {res.text}")
+        else:
+            print(f"[{tw_now_str}] [OK] 成功發送 Telegram 推播！")
     except Exception as e:
         print(f"Telegram API 錯誤: {e}")
 
