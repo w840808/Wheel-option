@@ -369,8 +369,9 @@ def log_signal_to_db(symbol, signal_type, details):
         print(f"無法寫入 signal_logs: {e}")
 
 def is_notification_allowed() -> bool:
-    """檢查當前台灣時間是否在允許推播時段內 (台灣時間 21:30 ~ 23:45)
-    避開半夜與清晨收盤時段 (00:00 ~ 21:30)，避免半夜打擾使用者睡眠。
+    """檢查當前台灣時間是否在允許推播時段內 (美股冬令時間 22:25 ~ 00:30)
+    美股冬令時間於台灣時間 22:30 開盤，開盤前半場 22:25 ~ 00:30 允許推播。
+    半夜 00:30 ~ 22:25 自動靜音，避免打擾睡眠。
     """
     if os.getenv("FORCE_NOTIFY", "").lower() in ["true", "1"]:
         return True
@@ -378,23 +379,26 @@ def is_notification_allowed() -> bool:
     tw_tz = datetime.timezone(datetime.timedelta(hours=8))
     tw_now = datetime.datetime.now(tw_tz)
     
-    # 僅在週一到週五的美股交易日推播
-    if tw_now.weekday() > 4:
-        return False
-        
+    weekday = tw_now.weekday()  # 0=週一, 1=週二, ..., 4=週五, 5=週六, 6=週日
     current_minutes = tw_now.hour * 60 + tw_now.minute
-    start_minutes = 21 * 60 + 30   # 21:30
-    end_minutes = 23 * 60 + 45     # 23:45
     
-    return start_minutes <= current_minutes <= end_minutes
+    # 情況 1：週一至週五晚上 (22:25 ~ 23:59)
+    if 0 <= weekday <= 4 and current_minutes >= (22 * 60 + 25):
+        return True
+        
+    # 情況 2：週二至週六凌晨 (00:00 ~ 00:30) 美股盤中跨夜前半小時
+    if 1 <= weekday <= 5 and current_minutes <= (0 * 60 + 30):
+        return True
+        
+    return False
 
-def send_telegram_message(text: str):
+def send_telegram_message(text: str, force: bool = False):
     tw_tz = datetime.timezone(datetime.timedelta(hours=8))
     tw_now_str = datetime.datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')
     
-    # 時間守衛：若非允許時段，自動攔截靜音
-    if not is_notification_allowed():
-        print(f"[{tw_now_str}] [SILENT] 當前為靜音時段 (僅允許台灣時間 21:30 ~ 23:45 推播)，已略過 Telegram 發送以避免半夜打擾。")
+    # 時間守衛：若非強制發送且非允許時段，自動攔截靜音
+    if not force and not is_notification_allowed():
+        print(f"[{tw_now_str}] [SILENT] 當前為靜音時段 (僅允許台灣時間 22:25 ~ 00:30 推播)，已略過 Telegram 發送以避免半夜打擾。")
         return
         
     try:
@@ -412,7 +416,7 @@ def send_telegram_message(text: str):
     except Exception as e:
         print(f"Telegram API 錯誤: {e}")
 
-def check_active_options():
+def check_active_options(force: bool = False):
     print(f"[{datetime.datetime.now()}] 開始檢查活躍選擇權倉位 (Take Profit / Rolling)...")
     try:
         active_options = supabase.table("active_options").select("*").execute().data
@@ -452,7 +456,7 @@ def check_active_options():
                     msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
                     msg += f"當前獲利: {profit_pct:.1f}%\n"
                     msg += f"👉 建議: 利潤已達標，建議買回平倉釋放資金效率！\n"
-                    send_telegram_message(msg)
+                    send_telegram_message(msg, force=force)
                     log_signal_to_db(symbol, "🎯 停利提醒", f"獲利達標 {profit_pct:.1f}% | 合約: {exp_date_str} ${strike} {opt_type.capitalize()} | 成本 ${current_ask:.2f} (原收 ${premium_received:.2f})")
                     
                 # 停損 / 浮虧
@@ -463,7 +467,7 @@ def check_active_options():
                     msg += f"當前平倉成本: ${current_ask:.2f} (原收取: ${premium_received:.2f})\n"
                     msg += f"當前虧損: {profit_pct:.1f}%\n"
                     msg += f"👉 建議: 密切注意標的走勢，考慮轉倉 (Roll) 或停損！\n"
-                    send_telegram_message(msg)
+                    send_telegram_message(msg, force=force)
                     log_signal_to_db(symbol, "📉 浮虧警告", f"浮虧超標 {profit_pct:.1f}% | 合約: {exp_date_str} ${strike} {opt_type.capitalize()} | 成本 ${current_ask:.2f} (原收 ${premium_received:.2f})")
             
             # 轉倉檢查 (21 DTE)
@@ -472,7 +476,7 @@ def check_active_options():
                 msg += f"標的: ${symbol}{stock_str}\n"
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 距離到期日過近，Gamma 風險增加，建議提早平倉或延期 (Roll Out)！\n"
-                send_telegram_message(msg)
+                send_telegram_message(msg, force=force)
                 log_signal_to_db(symbol, "⚠️ 轉倉提醒", f"剩餘 {dte} 天 (DTE≤21) | 合約: {exp_date_str} ${strike} {opt_type.capitalize()}")
                 
             # 到期檢查
@@ -481,18 +485,19 @@ def check_active_options():
                 msg += f"標的: ${symbol}{stock_str}\n"
                 msg += f"合約: {exp_date_str} 到期 ${strike} {opt_type.capitalize()}\n"
                 msg += f"👉 建議: 請登入券商確認是否被履約或價值歸零，並在系統中完成結算平倉！\n"
-                send_telegram_message(msg)
+                send_telegram_message(msg, force=force)
                 log_signal_to_db(symbol, "🚨 到期提醒", f"合約今日到期 (DTE: {dte}) | 合約: {exp_date_str} ${strike} {opt_type.capitalize()}")
                 
     except Exception as e:
         print(f"檢查活躍倉位發生錯誤: {e}")
 
-def run_scan():
+def run_scan(force: bool = False):
     print(f"[{datetime.datetime.now()}] 開始執行自動掃描任務...")
     
     # 先檢查現有活躍部位
-    check_active_options()
+    check_active_options(force=force)
     
+    signals_count = 0
     
     # 預設參數 (可根據需要修改或設計從 DB 讀取)
     SP_RSI_THRESH, SP_IV_THRESH, SP_DELTA = 45, 30.0, 0.15
@@ -527,9 +532,10 @@ def run_scan():
                     f"-------------------------\n"
                     f"推薦合約：\n{opts_msg}"
                 )
-                send_telegram_message(msg)
+                send_telegram_message(msg, force=force)
                 log_signal_to_db(symbol, "SP_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
                 print(f"[OK] 已推播 {symbol} Sell Put 訊號")
+                signals_count += 1
 
     # 2. 掃描 Covered Call
     portfolio = supabase.table("portfolio").select("*").execute().data
@@ -559,11 +565,13 @@ def run_scan():
                     f"-------------------------\n"
                     f"推薦合約：\n{opts_msg}"
                 )
-                send_telegram_message(msg)
+                send_telegram_message(msg, force=force)
                 log_signal_to_db(symbol, "CC_AUTO", f"Price: {price}, RSI: {rsi}, IV: {iv}, Options: {len(options)}")
                 print(f"[OK] 已推播 {symbol} Covered Call 訊號")
+                signals_count += 1
                 
-    print(f"[{datetime.datetime.now()}] 掃描任務完成！")
+    print(f"[{datetime.datetime.now()}] 掃描任務完成！發現 {signals_count} 個訊號。")
+    return signals_count
 
 if __name__ == "__main__":
     run_scan()
