@@ -304,7 +304,7 @@ def fetch_option_prices(sym, strike, exp_date_str, opt_type):
         }
         for assetclass in ["stocks", "etf"]:
             url = f"https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={assetclass}&limit=1000&fromdate={exp_date_str}&todate={exp_date_str}"
-            res = requests.get(url, headers=headers)
+            res = requests.get(url, headers=headers, timeout=8)
             if res.status_code != 200: continue
             data = res.json()
             if not data or not data.get("data") or not data["data"].get("table"): continue

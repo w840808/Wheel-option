@@ -31,10 +31,10 @@ if os.path.exists(secrets_path):
         TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN or sec.get("TELEGRAM_BOT_TOKEN")
         CHAT_ID = CHAT_ID or sec.get("CHAT_ID")
     except Exception as e:
-        print(f"載入 secrets.toml 失敗: {e}")
+        print(f"載入 secrets.toml 失敗: {e}", flush=True)
 
 if not all([SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, CHAT_ID]):
-    print("❌ 缺少必要連線金鑰，請檢查 secrets.toml 或環境變數。")
+    print("❌ 缺少必要連線金鑰，請檢查 secrets.toml 或環境變數。", flush=True)
     sys.exit(1)
 
 CHAT_ID = str(CHAT_ID).strip()
@@ -63,6 +63,10 @@ DEFAULT_KEYBOARD = {
     "resize_keyboard": True
 }
 
+# 狀態鎖：防止重複並發掃描
+scan_lock = threading.Lock()
+is_scanning = False
+
 # ==========================================
 # Telegram 輔助工具函式
 # ==========================================
@@ -79,8 +83,37 @@ def send_reply(chat_id, text, reply_markup=DEFAULT_KEYBOARD):
         res = requests.post(url, json=payload, timeout=12)
         return res.status_code == 200
     except Exception as e:
-        print(f"發送訊息異常: {e}")
+        print(f"發送訊息異常: {e}", flush=True)
         return False
+
+def send_chat_action(chat_id, action="typing"):
+    """發送聊天狀態（如 typing 正在輸入...）"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=5)
+    except Exception:
+        pass
+
+class TypingNotifier:
+    """在背景定時發送 typing 動態，讓使用者清楚知道程式正在運算"""
+    def __init__(self, chat_id, interval=4):
+        self.chat_id = chat_id
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        send_chat_action(self.chat_id, "typing")
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return self
+
+    def _loop(self):
+        while not self.stop_event.wait(self.interval):
+            send_chat_action(self.chat_id, "typing")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
 
 def register_bot_commands():
     """向 Telegram 註冊斜線指令選單"""
@@ -98,13 +131,26 @@ def register_bot_commands():
         pass
 
 # ==========================================
-# 業務邏輯處理器
+# 業務邏輯處理器 (在獨立 Worker Thread 中執行)
 # ==========================================
 def handle_scan(chat_id):
     """執行即時掃描並回傳結果"""
-    send_reply(chat_id, "⏳ 正在啟動即時掃描（檢查部位 + 掃描清單），請稍候 15~30 秒...")
+    global is_scanning
+    with scan_lock:
+        if is_scanning:
+            send_reply(
+                chat_id,
+                "⏳ <b>全市場掃描已在進行中！</b>\n"
+                "正在抓取 16 檔標的之即時技術面與選擇權鏈，合約推薦正陸續推播送達，請稍候片刻，無須重複點擊。"
+            )
+            return
+        is_scanning = True
+
     try:
-        found_count = run_scan(force=True)
+        send_reply(chat_id, "⏳ <b>已啟動全市場即時掃描！</b>\n正在為您檢查部位、掃描觀察清單 16 檔標的，請稍候約 20~30 秒...")
+        with TypingNotifier(chat_id):
+            found_count = run_scan(force=True)
+            
         if found_count == 0:
             msg = (
                 "✅ <b>掃描任務完成！</b>\n\n"
@@ -113,120 +159,124 @@ def handle_scan(chat_id):
             )
             send_reply(chat_id, msg)
         else:
-            send_reply(chat_id, f"✅ <b>掃描完成！共發現 {found_count} 個符合策略門檻的推薦合約。</b>")
+            send_reply(chat_id, f"✅ <b>掃描完成！共發現並推播了 {found_count} 個符合策略門檻的推薦合約。</b>")
     except Exception as e:
         send_reply(chat_id, f"❌ 執行掃描時發生錯誤: {e}")
+    finally:
+        is_scanning = False
 
 def handle_positions(chat_id):
     """查詢活躍選擇權部位"""
     send_reply(chat_id, "⏳ 正在連接市場抓取當前持倉最新行情與 Greeks...")
     try:
-        positions = supabase.table("active_options").select("*").order("expiration_date", desc=False).execute().data
-        if not positions:
-            send_reply(chat_id, "🎯 <b>目前無任何未平倉選擇權部位。</b>\n資金處於空閒狀態，可點擊「🔍 立即掃描訊號」尋找優質標的！")
-            return
-            
-        today = datetime.date.today()
-        cards = []
-        total_pnl_usd = 0.0
-        
-        for pos in positions:
-            symbol = pos["symbol"]
-            opt_type = pos["option_type"]
-            strike = float(pos["strike"])
-            exp_date_str = pos["expiration_date"]
-            premium_received = float(pos["premium_received"])
-            qty = int(pos.get("quantity", 1))
-            
-            exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-            
-            # 抓取即時標的價與選擇權最新平倉成本
-            stock_price = fetch_stock_price(symbol)
-            current_price, current_ask, err = fetch_option_prices(symbol, strike, exp_date_str, opt_type.lower())
-            
-            close_cost = current_ask if current_ask > 0 else current_price
-            
-            # 狀態計算
-            if close_cost > 0:
-                profit_pct = ((premium_received - close_cost) / premium_received) * 100
-                pnl_usd = (premium_received - close_cost) * 100 * qty
-                total_pnl_usd += pnl_usd
+        with TypingNotifier(chat_id):
+            positions = supabase.table("active_options").select("*").order("expiration_date", desc=False).execute().data
+            if not positions:
+                send_reply(chat_id, "🎯 <b>目前無任何未平倉選擇權部位。</b>\n資金處於空閒狀態，可點擊「🔍 立即掃描訊號」尋找優質標的！")
+                return
                 
-                # 徽章判定
-                if profit_pct >= 50:
-                    badge = "🎯 <b>【可停利】獲利達標</b>"
-                elif profit_pct <= -50:
-                    badge = "📉 <b>【警戒】浮虧擴大</b>"
-                elif 0 <= dte <= 21:
-                    badge = "⚠️ <b>【建議轉倉】DTE ≤ 21</b>"
-                else:
-                    badge = "⚡ <b>【持倉中】正常運作</b>"
-                    
-                pnl_color = "+" if pnl_usd >= 0 else ""
-                card = (
-                    f"{badge}\n"
-                    f"標的: <b>${symbol}</b> (現價: ${stock_price:.2f})\n"
-                    f"合約: {exp_date_str} (${strike} {opt_type.upper()}) | {qty}口\n"
-                    f"收取權利金: ${premium_received:.2f} ➔ 現價: ${close_cost:.2f}\n"
-                    f"損益率: <b>{profit_pct:+.1f}%</b> ({pnl_color}${pnl_usd:.1f})\n"
-                    f"剩餘到期: <b>{dte} 天</b>"
-                )
-            else:
-                card = (
-                    f"⚡ <b>【持倉中】</b>\n"
-                    f"標的: <b>${symbol}</b> (現價: ${stock_price:.2f})\n"
-                    f"合約: {exp_date_str} (${strike} {opt_type.upper()}) | {qty}口\n"
-                    f"收取權利金: ${premium_received:.2f}\n"
-                    f"剩餘到期: <b>{dte} 天</b> (現價報價暫缺)"
-                )
-            cards.append(card)
+            today = datetime.date.today()
+            cards = []
+            total_pnl_usd = 0.0
             
-        summary = (
-            f"💼 <b>【活躍部位匯總清單】</b> (共 {len(positions)} 筆)\n"
-            f"---------------------------------\n\n" +
-            "\n\n---------------------------------\n\n".join(cards) +
-            f"\n\n---------------------------------\n"
-            f"💰 <b>總浮動未實現損益: {total_pnl_usd:+.2f} USD</b>"
-        )
-        send_reply(chat_id, summary)
+            for pos in positions:
+                symbol = pos["symbol"]
+                opt_type = pos["option_type"]
+                strike = float(pos["strike"])
+                exp_date_str = pos["expiration_date"]
+                premium_received = float(pos["premium_received"])
+                qty = int(pos.get("quantity", 1))
+                
+                exp_date = datetime.datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                
+                # 抓取即時標的價與選擇權最新平倉成本
+                stock_price = fetch_stock_price(symbol)
+                current_price, current_ask, err = fetch_option_prices(symbol, strike, exp_date_str, opt_type.lower())
+                
+                close_cost = current_ask if current_ask > 0 else current_price
+                
+                # 狀態計算
+                if close_cost > 0:
+                    profit_pct = ((premium_received - close_cost) / premium_received) * 100
+                    pnl_usd = (premium_received - close_cost) * 100 * qty
+                    total_pnl_usd += pnl_usd
+                    
+                    # 徽章判定
+                    if profit_pct >= 50:
+                        badge = "🎯 <b>【可停利】獲利達標</b>"
+                    elif profit_pct <= -50:
+                        badge = "📉 <b>【警戒】浮虧擴大</b>"
+                    elif 0 <= dte <= 21:
+                        badge = "⚠️ <b>【建議轉倉】DTE ≤ 21</b>"
+                    else:
+                        badge = "⚡ <b>【持倉中】正常運作</b>"
+                        
+                    pnl_color = "+" if pnl_usd >= 0 else ""
+                    card = (
+                        f"{badge}\n"
+                        f"標的: <b>${symbol}</b> (現價: ${stock_price:.2f})\n"
+                        f"合約: {exp_date_str} (${strike} {opt_type.upper()}) | {qty}口\n"
+                        f"收取權利金: ${premium_received:.2f} ➔ 現價: ${close_cost:.2f}\n"
+                        f"損益率: <b>{profit_pct:+.1f}%</b> ({pnl_color}${pnl_usd:.1f})\n"
+                        f"剩餘到期: <b>{dte} 天</b>"
+                    )
+                else:
+                    card = (
+                        f"⚡ <b>【持倉中】</b>\n"
+                        f"標的: <b>${symbol}</b> (現價: ${stock_price:.2f})\n"
+                        f"合約: {exp_date_str} (${strike} {opt_type.upper()}) | {qty}口\n"
+                        f"收取權利金: ${premium_received:.2f}\n"
+                        f"剩餘到期: <b>{dte} 天</b> (現價報價暫缺)"
+                    )
+                cards.append(card)
+                
+            summary = (
+                f"💼 <b>【活躍部位匯總清單】</b> (共 {len(positions)} 筆)\n"
+                f"---------------------------------\n\n" +
+                "\n\n---------------------------------\n\n".join(cards) +
+                f"\n\n---------------------------------\n"
+                f"💰 <b>總浮動未實現損益: {total_pnl_usd:+.2f} USD</b>"
+            )
+            send_reply(chat_id, summary)
     except Exception as e:
         send_reply(chat_id, f"❌ 查詢部位失敗: {e}")
 
 def handle_history(chat_id):
     """查詢歷史已實現平倉損益"""
     try:
-        history = supabase.table("trade_history").select("*").order("close_date", desc=True).execute().data
-        if not history:
-            send_reply(chat_id, "📊 <b>尚無任何歷史已平倉紀錄。</b>")
-            return
+        with TypingNotifier(chat_id):
+            history = supabase.table("trade_history").select("*").order("close_date", desc=True).execute().data
+            if not history:
+                send_reply(chat_id, "📊 <b>尚無任何歷史已平倉紀錄。</b>")
+                return
+                
+            total_trades = len(history)
+            win_trades = sum(1 for h in history if float(h.get("pnl", 0)) > 0)
+            win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+            total_pnl = sum(float(h.get("pnl", 0)) for h in history)
             
-        total_trades = len(history)
-        win_trades = sum(1 for h in history if float(h.get("pnl", 0)) > 0)
-        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
-        total_pnl = sum(float(h.get("pnl", 0)) for h in history)
-        
-        recent_cards = []
-        for h in history[:5]:
-            sym = h.get("symbol")
-            opt_t = h.get("option_type", "").upper()
-            strike = h.get("strike")
-            pnl = float(h.get("pnl", 0))
-            c_date = h.get("close_date", "")
-            icon = "🟢" if pnl >= 0 else "🔴"
-            recent_cards.append(f"{icon} {c_date} | <b>{sym}</b> {strike} {opt_t}: <b>{pnl:+.1f} USD</b>")
-            
-        msg = (
-            f"📊 <b>【選擇權歷史績效統計】</b>\n"
-            f"---------------------------------\n"
-            f"累積平倉次數: <b>{total_trades} 筆</b>\n"
-            f"勝率: <b>{win_rate:.1f}%</b> ({win_trades} 勝 / {total_trades - win_trades} 負)\n"
-            f"累積實現總利潤: <b>{total_pnl:+.2f} USD</b>\n"
-            f"---------------------------------\n"
-            f"<b>最近 5 筆平倉紀錄:</b>\n" +
-            "\n".join(recent_cards)
-        )
-        send_reply(chat_id, msg)
+            recent_cards = []
+            for h in history[:5]:
+                sym = h.get("symbol")
+                opt_t = h.get("option_type", "").upper()
+                strike = h.get("strike")
+                pnl = float(h.get("pnl", 0))
+                c_date = h.get("close_date", "")
+                icon = "🟢" if pnl >= 0 else "🔴"
+                recent_cards.append(f"{icon} {c_date} | <b>{sym}</b> {strike} {opt_t}: <b>{pnl:+.1f} USD</b>")
+                
+            msg = (
+                f"📊 <b>【選擇權歷史績效統計】</b>\n"
+                f"---------------------------------\n"
+                f"累積平倉次數: <b>{total_trades} 筆</b>\n"
+                f"勝率: <b>{win_rate:.1f}%</b> ({win_trades} 勝 / {total_trades - win_trades} 負)\n"
+                f"累積實現總利潤: <b>{total_pnl:+.2f} USD</b>\n"
+                f"---------------------------------\n"
+                f"<b>最近 5 筆平倉紀錄:</b>\n" +
+                "\n".join(recent_cards)
+            )
+            send_reply(chat_id, msg)
     except Exception as e:
         send_reply(chat_id, f"❌ 查詢歷史損益失敗: {e}")
 
@@ -234,37 +284,38 @@ def handle_watchlist(chat_id):
     """查詢觀察清單即時狀態"""
     send_reply(chat_id, "⏳ 正在更新觀察清單中所有標的的 RSI 與 IV Rank...")
     try:
-        rows = supabase.table("watchlist").select("*").execute().data
-        if not rows:
-            send_reply(chat_id, "📋 <b>目前觀察清單中沒有設定任何標的。</b>")
-            return
-            
-        cards = []
-        for r in rows:
-            symbol = r["symbol"]
-            price, rsi = calculate_rsi(symbol)
-            iv = get_iv_rank(symbol)
-            
-            rsi_str = f"{rsi:.1f}" if rsi else "N/A"
-            iv_str = f"{iv:.1f}%" if iv else "N/A"
-            price_str = f"${price:.2f}" if price else "N/A"
-            
-            status = "🟢"
-            if rsi and rsi < 45 and iv and iv > 30:
-                status = "🚨 <b>[可開倉]</b>"
-            elif rsi and rsi < 50:
-                status = "🟡 [偏弱]"
+        with TypingNotifier(chat_id):
+            rows = supabase.table("watchlist").select("*").execute().data
+            if not rows:
+                send_reply(chat_id, "📋 <b>目前觀察清單中沒有設定任何標的。</b>")
+                return
                 
-            cards.append(f"{status} <b>${symbol}</b>: {price_str} | RSI: {rsi_str} | IV: {iv_str}")
-            
-        msg = (
-            f"📋 <b>【觀察清單即時指標】</b>\n"
-            f"---------------------------------\n" +
-            "\n".join(cards) +
-            f"\n---------------------------------\n"
-            f"💡 <i>觸發門檻：RSI < 45 且 IV > 30% 即出現推薦合約</i>"
-        )
-        send_reply(chat_id, msg)
+            cards = []
+            for r in rows:
+                symbol = r["symbol"]
+                price, rsi = calculate_rsi(symbol)
+                iv = get_iv_rank(symbol)
+                
+                rsi_str = f"{rsi:.1f}" if rsi else "N/A"
+                iv_str = f"{iv:.1f}%" if iv else "N/A"
+                price_str = f"${price:.2f}" if price else "N/A"
+                
+                status = "🟢"
+                if rsi and rsi < 45 and iv and iv > 30:
+                    status = "🚨 <b>[可開倉]</b>"
+                elif rsi and rsi < 50:
+                    status = "🟡 [偏弱]"
+                    
+                cards.append(f"{status} <b>${symbol}</b>: {price_str} | RSI: {rsi_str} | IV: {iv_str}")
+                
+            msg = (
+                f"📋 <b>【觀察清單即時指標】</b>\n"
+                f"---------------------------------\n" +
+                "\n".join(cards) +
+                f"\n---------------------------------\n"
+                f"💡 <i>觸發門檻：RSI < 45 且 IV > 30% 即出現推薦合約</i>"
+            )
+            send_reply(chat_id, msg)
     except Exception as e:
         send_reply(chat_id, f"❌ 查詢觀察清單失敗: {e}")
 
@@ -273,39 +324,40 @@ def handle_ticker_check(chat_id, symbol):
     symbol = symbol.upper().strip()
     send_reply(chat_id, f"⏳ 正在體檢 <b>${symbol}</b> 即時技術面與選擇權鏈...")
     try:
-        price, rsi = calculate_rsi(symbol)
-        if not price:
-            send_reply(chat_id, f"❌ 查無 <b>${symbol}</b> 的美股行情，請確認股票代號是否正確。")
-            return
+        with TypingNotifier(chat_id):
+            price, rsi = calculate_rsi(symbol)
+            if not price:
+                send_reply(chat_id, f"❌ 查無 <b>${symbol}</b> 的美股行情，請確認股票代號是否正確。")
+                return
+                
+            iv = get_iv_rank(symbol)
+            earnings = get_next_earnings(symbol)
+            earn_text = f"\n⚠️ 下次財報日: <b>{earnings}</b>" if earnings else ""
             
-        iv = get_iv_rank(symbol)
-        earnings = get_next_earnings(symbol)
-        earn_text = f"\n⚠️ 下次財報日: <b>{earnings}</b>" if earnings else ""
-        
-        # 抓取推薦 Sell Put (30~45 DTE, Delta 0.15~0.25)
-        options = get_real_put_option(symbol, price, 0.30, False, earnings)
-        
-        opt_text = ""
-        if options:
-            for opt in options[:3]:
-                opt_text += (
-                    f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Put</b>\n"
-                    f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n"
-                )
-        else:
-            opt_text = "目前無符合 30~45 DTE 且流動性良好之 Put 合約。\n"
+            # 抓取推薦 Sell Put (30~45 DTE, Delta 0.15~0.25)
+            options = get_real_put_option(symbol, price, 0.30, False, earnings)
             
-        msg = (
-            f"🔎 <b>【${symbol} 標的即時體檢】</b>\n"
-            f"現價: <b>${price:.2f}</b>\n"
-            f"14日 RSI: <b>{rsi:.1f}</b>\n"
-            f"IV Rank (30D): <b>{iv:.1f}%</b>{earn_text}\n"
-            f"---------------------------------\n"
-            f"🎯 <b>推薦 Sell Put 合約:</b>\n{opt_text}"
-            f"---------------------------------\n"
-            f"💡 <i>回覆任何股票代碼 (例: TSLA, NVDA) 即可隨時體檢！</i>"
-        )
-        send_reply(chat_id, msg)
+            opt_text = ""
+            if options:
+                for opt in options[:3]:
+                    opt_text += (
+                        f"👉 <b>{opt['dte']}天後到期 ${opt['strike']} Put</b>\n"
+                        f"    Delta: {opt['delta']} | 權利金: ${opt['premium']} | <b>年化: {opt['annualized_return']}%</b>\n"
+                    )
+            else:
+                opt_text = "目前無符合 30~45 DTE 且流動性良好之 Put 合約。\n"
+                
+            msg = (
+                f"🔎 <b>【${symbol} 標的即時體檢】</b>\n"
+                f"現價: <b>${price:.2f}</b>\n"
+                f"14日 RSI: <b>{rsi:.1f}</b>\n"
+                f"IV Rank (30D): <b>{iv:.1f}%</b>{earn_text}\n"
+                f"---------------------------------\n"
+                f"🎯 <b>推薦 Sell Put 合約:</b>\n{opt_text}"
+                f"---------------------------------\n"
+                f"💡 <i>回覆任何股票代碼 (例: TSLA, NVDA) 即可隨時體檢！</i>"
+            )
+            send_reply(chat_id, msg)
     except Exception as e:
         send_reply(chat_id, f"❌ 查詢標的 {symbol} 失敗: {e}")
 
@@ -330,9 +382,9 @@ def handle_help(chat_id):
     send_reply(chat_id, msg)
 
 # ==========================================
-# 訊息派發路由器
+# 訊息派發路由器 (由主迴圈非同步呼叫)
 # ==========================================
-def process_message(msg):
+def process_message_async(msg):
     chat = msg.get("chat", {})
     chat_id = str(chat.get("id", "")).strip()
     text = (msg.get("text") or "").strip()
@@ -342,11 +394,11 @@ def process_message(msg):
         
     # 安全驗證：僅響應授權的使用者 CHAT_ID
     if chat_id != CHAT_ID:
-        print(f"⚠️ 攔截到未獲授權的私訊請求 (Chat ID: {chat_id})")
+        print(f"⚠️ 攔截到未獲授權的私訊請求 (Chat ID: {chat_id})", flush=True)
         send_reply(chat_id, "⛔ 未獲授權的帳戶。此機器人為專屬私有策略工具。")
         return
         
-    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 收到使用者指令: {text}")
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 收到使用者指令: {text}", flush=True)
     
     cmd = text.lower().replace("@wangwheelbot", "").strip()
     
@@ -381,7 +433,7 @@ def background_scheduler_worker():
     """在背景監控時鐘，美股開盤後精準觸發自動掃描推播"""
     tw_tz = datetime.timezone(datetime.timedelta(hours=8))
     last_triggered_minute = ""
-    print("⏰ [排程核心] 冬令定時推播服務已啟動 (預設監聽台灣時間週一至週五 22:35 與 23:35)...")
+    print("⏰ [排程核心] 冬令定時推播服務已啟動 (預設監聽台灣時間週一至週五 22:35 與 23:35)...", flush=True)
     
     while True:
         try:
@@ -394,25 +446,22 @@ def background_scheduler_worker():
             if 0 <= weekday <= 4:
                 if time_str in ["22:35", "23:35"] and minute_key != last_triggered_minute:
                     last_triggered_minute = minute_key
-                    print(f"🚀 [定時觸發] 台灣時間 {time_str} 到達，自動啟動市場掃描與部位檢查！")
-                    try:
-                        run_scan(force=True)
-                    except Exception as e:
-                        print(f"定時掃描執行異常: {e}")
+                    print(f"🚀 [定時觸發] 台灣時間 {time_str} 到達，自動啟動市場掃描與部位檢查！", flush=True)
+                    threading.Thread(target=run_scan, args=(True,), daemon=True).start()
             
             time.sleep(25)
         except Exception as e:
-            print(f"排程線程異常: {e}")
+            print(f"排程線程異常: {e}", flush=True)
             time.sleep(30)
 
 # ==========================================
-# 長輪詢 (Long Polling) 主迴圈
+# 長輪詢 (Long Polling) 主迴圈 (非阻塞、多執行緒)
 # ==========================================
 def main():
-    print("=" * 60)
-    print("🚀 Wheel 選擇權策略 Telegram 雙向互動機器人啟動中...")
-    print(f"🎯 授權 Chat ID: {CHAT_ID}")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("🚀 Wheel 選擇權策略 Telegram 雙向互動機器人啟動中...", flush=True)
+    print(f"🎯 授權 Chat ID: {CHAT_ID}", flush=True)
+    print("=" * 60, flush=True)
     
     register_bot_commands()
     
@@ -427,14 +476,14 @@ def main():
         CHAT_ID,
         f"🟢 <b>【Wheel 策略機器人已連線就緒】</b>\n"
         f"上線時間：{online_time} (UTC+8)\n"
-        f"你可以直接點擊下方按鈕或輸入股票代碼與我互動！\n"
+        f"你可以直接點擊下方鍵盤按鈕或輸入股票代碼與我互動！\n"
         f"冬令開盤推播時間：每晚 <b>22:35</b> 與 <b>23:35</b> 自動巡檢。"
     )
     
     offset = None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     
-    print("📡 正在監聽 Telegram 訊息... (可隨時在手機發送指令互動)")
+    print("📡 正在監聽 Telegram 訊息... (可隨時在手機發送指令互動)", flush=True)
     
     while True:
         try:
@@ -449,18 +498,23 @@ def main():
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         if "message" in update:
-                            process_message(update["message"])
+                            # 關鍵優化：以獨立背景執行緒處理耗時任務，不阻塞主長輪詢迴圈
+                            threading.Thread(
+                                target=process_message_async,
+                                args=(update["message"],),
+                                daemon=True
+                            ).start()
             elif res.status_code == 409:
-                print("⚠️ 衝突：可能有另一個機器人實例正在運行，等待 5 秒...")
+                print("⚠️ 衝突：可能有另一個機器人實例正在運行，等待 5 秒...", flush=True)
                 time.sleep(5)
             else:
-                print(f"連線異常，HTTP {res.status_code}: {res.text}")
+                print(f"連線異常，HTTP {res.status_code}: {res.text}", flush=True)
                 time.sleep(3)
         except requests.exceptions.RequestException:
             # 網路短暫波動，安靜等待後重試
-            time.sleep(3)
+            time.sleep(2)
         except Exception as e:
-            print(f"輪詢處理錯誤: {e}")
+            print(f"輪詢處理錯誤: {e}", flush=True)
             time.sleep(3)
 
 if __name__ == "__main__":
